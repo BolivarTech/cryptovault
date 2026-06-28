@@ -47,6 +47,15 @@ guarantee. Keep the trait-based composition and the audited defaults.
 - HKDF sub-key derivation with domain separation if multiple keys are derived.
 - Feature-gate the FEC layer.
 
+## AVOID — minimize attack surface (security principle)
+- **Do NOT add cryptographic surface you don't need.** Every extra primitive,
+  mode, option, or config knob is more code to audit and more that can go wrong —
+  added crypto surface can *reduce* security. The NICE items are opt-in only when
+  a concrete, justified need arises; default to the smallest correct API.
+- **Do NOT roll your own cipher / KDF / MAC** — use the vetted RustCrypto crates.
+  (Rolling the *FEC* is acceptable because it is **not** a security primitive —
+  see the sibling `reedsolomon` crate; the same does **not** apply to AEAD/KDF.)
+
 ## Dependency note
 The FEC currently uses the third-party `reed-solomon` v0.2 (simple, lightly
 maintained). **Switch to the [`reedsolomon`](https://crates.io/crates/reedsolomon)
