@@ -2,3 +2,25 @@
 Cargo.lock
 **/*.rs.bk
 *.pdb
+
+# SBTDD + agent local artifacts (local to each developer, never tracked)
+CLAUDE.local.md
+CLAUDE.md
+.claude/
+sbtdd/
+planning/
+
+# Dev-only tooling, not part of the publishable crate. Canonical copy lives in
+# ~/BolivarTech/AI_Tools/ for reuse across repos.
+/scripts/graphify_ollama.py
+
+# Python bytecode/caches from dev scripts
+__pycache__/
+*.pyc
+
+# Graphify: commit graphify-out/ to share the knowledge graph, but keep
+# local-only / machine-specific artifacts out (per graphify howto §9).
+graphify-out/cost.json
+graphify-out/cache/
+graphify-out/.graphify_python
+graphify-out/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
