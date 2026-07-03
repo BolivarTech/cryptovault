@@ -80,6 +80,21 @@ pub const RS_BLOCK: usize = 255;
 /// Maximum interleave depth `I` (codewords per interleaver window).
 pub const RS_INTERLEAVE_MAX: usize = 16;
 
+/// Reed-Solomon-stream bytes per Viterbi encode/decode sub-block.
+///
+/// The inner `viterbi` 0.0.1 codec caps a single block at
+/// `MAX_SUPPORTED_INFO_BITS = 1_000_000` bits (`125_000` bytes). A full-payload
+/// RS stream (up to ≈ 12 MiB at the 10 MiB plaintext cap) exceeds that, so the
+/// Viterbi layer is applied in fixed sub-blocks of `VITERBI_CHUNK` bytes, each
+/// contributing its own [`TERMINATION_OVERHEAD`] zero-tail.
+///
+/// Chosen as `490 × RS_BLOCK = 124_950` bytes so a chunk aligns to whole
+/// Reed-Solomon codewords and its `124_950 × 8 = 999_600` info bits stay under
+/// the crate cap. The receiver derives the chunk structure from the framed body
+/// length alone (all chunks but the last encode exactly `VITERBI_CHUNK` bytes) —
+/// no bootstrapping, consistent with the framed-delivery rule (SR-R2 / SR-F3).
+pub const VITERBI_CHUNK: usize = 490 * RS_BLOCK;
+
 /// Argon2id memory cost, KiB (OWASP 2025: 64 MiB).
 pub const ARGON2_M_KIB: u32 = 65536;
 

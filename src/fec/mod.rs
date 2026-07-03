@@ -14,9 +14,11 @@
 
 pub mod interleaver;
 pub mod rs;
+pub mod viterbi;
 
 pub use interleaver::{BlockInterleaver, CsprngLayer, Interleaver};
 pub use rs::ReedSolomonCodec;
+pub use viterbi::ViterbiCodec;
 
 use crate::error::Result;
 
