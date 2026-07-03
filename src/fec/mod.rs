@@ -68,30 +68,73 @@ pub trait ErrorCorrection: Send + Sync {
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>>;
 }
 
-/// The concatenated FEC stack — Red-phase stub.
+/// The concatenated forward-error-correction stack (SR-F4).
 ///
-/// Implemented in the Green phase; the stub exists only so the failing tests
-/// compile and fail by assertion.
+/// Composes the three FEC stages behind the [`ErrorCorrection`] trait in the
+/// spec's pipeline order — Reed-Solomon (outer) → interleaver → Viterbi (inner):
+///
+/// ```text
+/// encode:  data ── RS ──▶ interleave ──▶ Viterbi ──▶ blob
+/// decode:  blob ── Viterbi ──▶ deinterleave ──▶ RS ──▶ data
+/// ```
+///
+/// It is **resilience, not security**: it sits *after* the AEAD and only lets a
+/// ciphertext survive a noisy channel. The stages are injected, so a test or an
+/// AEAD-only mode can swap any of them; [`ConcatenatedFec::default`] wires the
+/// audited defaults (RS(255,223), a depth-5 deterministic block interleaver, and
+/// the CCSDS `K=7 R=1/2` Viterbi codec).
+///
+/// # Examples
+///
+/// ```
+/// use cryptovault::fec::{ConcatenatedFec, ErrorCorrection};
+///
+/// let fec = ConcatenatedFec::default();
+/// let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+/// let blob = fec.encode(&data);
+/// assert_eq!(fec.decode(&blob, data.len()).unwrap(), data); // clean round-trip
+/// ```
 pub struct ConcatenatedFec {
+    /// Outer Reed-Solomon `RS(255,223)` code.
     rs: ReedSolomonCodec,
+    /// Burst-spreading interleaver (deterministic block, optionally + CSPRNG).
     il: Interleaver,
+    /// Inner CCSDS `K=7 R=1/2` Viterbi convolutional code.
     vt: ViterbiCodec,
 }
 
 impl ConcatenatedFec {
-    /// Red-phase stub constructor.
+    /// Composes a concatenated FEC stack from injected stages (SR-F4).
+    ///
+    /// The dependency-injection constructor: pass custom stages for tests, an
+    /// AEAD-only configuration, or future algorithm rotation.
+    /// [`ConcatenatedFec::default`] wires the audited defaults instead.
+    ///
+    /// # Parameters
+    /// - `rs`: the outer Reed-Solomon codec.
+    /// - `il`: the interleaving stage.
+    /// - `vt`: the inner Viterbi codec.
+    ///
+    /// # Returns
+    /// The composed stack.
+    #[must_use]
     pub fn new(rs: ReedSolomonCodec, il: Interleaver, vt: ViterbiCodec) -> Self {
         Self { rs, il, vt }
     }
 }
 
 impl Default for ConcatenatedFec {
+    /// Wires the audited default stack: RS(255,223), a depth-5 deterministic
+    /// block interleaver ([`DEFAULT_INTERLEAVE_DEPTH`]), and the CCSDS Viterbi
+    /// codec.
     fn default() -> Self {
         Self::new(
             ReedSolomonCodec,
             Interleaver::Block(
+                // Statically valid: DEFAULT_INTERLEAVE_DEPTH is within
+                // `1..=RS_INTERLEAVE_MAX` by construction.
                 BlockInterleaver::new(DEFAULT_INTERLEAVE_DEPTH)
-                    .expect("DEFAULT_INTERLEAVE_DEPTH is in range"),
+                    .expect("DEFAULT_INTERLEAVE_DEPTH is a valid interleave depth"),
             ),
             ViterbiCodec,
         )
@@ -99,14 +142,42 @@ impl Default for ConcatenatedFec {
 }
 
 impl ErrorCorrection for ConcatenatedFec {
+    /// Encodes `data` through the full pipeline `Viterbi(interleave(RS(data)))`
+    /// (SR-F4).
     fn encode(&self, data: &[u8]) -> Vec<u8> {
-        let _ = (&self.il, &self.vt);
-        data.to_vec() // stub: identity, not the real pipeline
+        self.vt.encode(&self.il.interleave(&self.rs.encode(data)))
     }
 
+    /// Decodes a received blob through the exact inverse pipeline, recovering the
+    /// original `data` truncated to `pre_len` (SR-F4).
+    ///
+    /// Stages, in order: **(1)** structural pre-FEC validation
+    /// ([`validate_pre_fec`](crate::blob::validate_pre_fec), SR-R3a) derives the
+    /// expected RS-stream length `l` and rejects a malformed/oversized blob before
+    /// any large allocation; **(2)** Viterbi decode; **(3)** a post-Viterbi
+    /// length cross-check (`rs_stream.len() == l`, SR-R3b) that catches a
+    /// codec-length bug; **(4)** de-interleave then Reed-Solomon decode.
+    ///
+    /// # Errors
+    /// - [`crate::error::CryptoError::InvalidInput`] if the blob fails structural
+    ///   validation (SR-R3a) or the post-Viterbi length is inconsistent (SR-R3b).
+    /// - [`crate::error::CryptoError::ErrorCorrection`] if corruption exceeds the
+    ///   concatenated code's correction capacity.
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
-        let _ = (&self.rs, &self.il, &self.vt, encoded, pre_len);
-        Ok(Vec::new()) // stub
+        // (1) SR-R3a: structural pre-FEC gate → expected RS-stream length.
+        let l = crate::blob::validate_pre_fec(encoded)?;
+        // (2) Invert the inner Viterbi code.
+        let rs_stream = self.vt.decode(encoded)?;
+        // (3) SR-R3b: the actual decoded length must match the pre-derived `l`
+        // (defends against a Viterbi-crate length bug).
+        if rs_stream.len() != l {
+            return Err(crate::error::CryptoError::InvalidInput(format!(
+                "post-Viterbi RS-stream length {} disagrees with the framed length {l}",
+                rs_stream.len()
+            )));
+        }
+        // (4) Undo the interleaver, then the outer Reed-Solomon code.
+        self.rs.decode(&self.il.deinterleave(&rs_stream), pre_len)
     }
 }
 
