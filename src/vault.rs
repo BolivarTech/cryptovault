@@ -5,6 +5,290 @@
 //! envelope key-wrapping and generation helpers (implemented in Tasks 15+,
 //! SR-C5/C6/C8).
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use zeroize::Zeroizing;
+
+use crate::blob::{decode_blob, encode_blob};
+use crate::cipher::{sample_nonce, Aes256GcmSivCipher, AuthenticatedCipher};
+use crate::error::{CryptoError, Result};
+use crate::fec::{ConcatenatedFec, ErrorCorrection};
+use crate::kdf::{expand_aead_key, Argon2Kdf, KeyDerivation};
+use crate::{BLOB_VERSION, HEADER_LEN, MAX_B64_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, SALT_LEN};
+
+/// Identity [`ErrorCorrection`] — the AEAD-only degraded-but-secure fallback.
+///
+/// Injecting `NoFec` into [`CryptoVault::new`] disables the concatenated FEC
+/// stack entirely: `encode` returns its input unchanged and `decode` merely
+/// truncates to the pre-encode length. Confidentiality and integrity are
+/// **fully preserved** (they come only from the AEAD, applied first); only the
+/// channel-resilience layer is dropped. Use it when the FEC stack must be
+/// bypassed (e.g. a clean transport, or to isolate a FEC-crate issue).
+///
+/// A fieldless strategy struct — construct it directly (`NoFec`); it holds no
+/// state.
+///
+/// # Examples
+/// ```
+/// use cryptovault::fec::ErrorCorrection;
+/// use cryptovault::vault::NoFec;
+/// assert_eq!(NoFec.encode(b"abc"), b"abc");
+/// assert_eq!(NoFec.decode(b"abcdef", 3).unwrap(), b"abc");
+/// ```
+pub struct NoFec;
+
+impl ErrorCorrection for NoFec {
+    /// Returns `data` unchanged (identity encode).
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        data.to_vec()
+    }
+
+    /// Returns `encoded` truncated to `pre_len` (identity decode).
+    ///
+    /// `pre_len` is clamped to `encoded.len()`, so an out-of-range length never
+    /// panics (SR-R5 no-panic contract).
+    ///
+    /// # Errors
+    /// Infallible in practice; the [`Result`] keeps the [`ErrorCorrection`]
+    /// contract uniform with the fallible concatenated stack.
+    fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
+        let end = pre_len.min(encoded.len());
+        Ok(encoded[..end].to_vec())
+    }
+}
+
+/// The public authenticated-encryption facade composing the three injectable
+/// strategy traits (SR-C2 / SR-C5 / SR-F4).
+///
+/// `CryptoVault` wires a [`KeyDerivation`] (Argon2id master), an
+/// [`AuthenticatedCipher`] (AES-256-GCM-SIV), and an [`ErrorCorrection`] stack
+/// (the concatenated FEC) into one pipeline: AEAD **first** (the only source of
+/// security), FEC **after** (resilience, never security). Build it with
+/// [`CryptoVault::default`] for the audited defaults, or [`CryptoVault::new`] to
+/// inject custom strategies (tests, deterministic nonces, algorithm rotation).
+///
+/// The vault holds **no secret state**: the master returned by
+/// [`derive_key`](Self::derive_key) is cached by the *caller* in [`Zeroizing`]
+/// and passed per call, so the vault is immutable after construction and
+/// `Send + Sync` — a single instance can encrypt/decrypt concurrently.
+///
+/// # ⚠️ Memory
+///
+/// Decryption is **memory-heavy**. Each `decrypt` call holds several
+/// O(blob)-sized buffers at once (base64 input, decoded blob, Viterbi output,
+/// de-interleaved stream, RS output, plaintext), so at the 10 MiB plaintext cap
+/// ([`crate::MAX_PLAINTEXT_LEN`]) a single decrypt **peaks at ≈ 80 MB — roughly
+/// 8× the payload**. There is **NO built-in concurrency limit**: `N` concurrent
+/// decrypts consume **≈ `N` × 80 MB**, so **callers MUST bound the number of
+/// concurrent decrypts** (a semaphore / worker pool) or risk out-of-memory.
+/// Concurrency policy is deliberately a caller/service-layer concern
+/// (minimize-surface); the vault stays single-blob-per-call.
+///
+/// # Examples
+/// ```
+/// use cryptovault::vault::CryptoVault;
+/// let vault = CryptoVault::default();
+/// let master = vault.derive_key("correct horse battery staple", &[0u8; 16]).unwrap();
+/// assert_eq!(master.len(), 32);
+/// ```
+pub struct CryptoVault {
+    /// Master-key derivation strategy (Argon2id by default).
+    kdf: Box<dyn KeyDerivation>,
+    /// Authenticated cipher strategy (AES-256-GCM-SIV by default).
+    cipher: Box<dyn AuthenticatedCipher>,
+    /// Error-correction strategy (the concatenated FEC by default).
+    fec: Box<dyn ErrorCorrection>,
+}
+
+impl CryptoVault {
+    /// Constructs a vault from injected strategies (dependency injection).
+    ///
+    /// Prefer [`CryptoVault::default`] for production (audited wiring); use `new`
+    /// for tests, deterministic-nonce ciphers, an AEAD-only [`NoFec`] stack, or
+    /// future algorithm rotation.
+    ///
+    /// # Parameters
+    /// - `kdf`: the master-key derivation strategy.
+    /// - `cipher`: the authenticated cipher strategy.
+    /// - `fec`: the error-correction strategy.
+    ///
+    /// # Returns
+    /// The composed vault.
+    #[must_use]
+    pub fn new(
+        kdf: Box<dyn KeyDerivation>,
+        cipher: Box<dyn AuthenticatedCipher>,
+        fec: Box<dyn ErrorCorrection>,
+    ) -> Self {
+        Self { kdf, cipher, fec }
+    }
+
+    /// Derives the session **master** secret from a passphrase and per-context
+    /// salt (SR-C2), once per session.
+    ///
+    /// The returned value is the *master* — the crate HKDF-expands it internally
+    /// into the AEAD sub-key and interleaver seed (SR-C3); **callers never handle
+    /// those sub-keys**. Cache this master in [`Zeroizing`] and pass it to the
+    /// encrypt / decrypt / envelope operations; Argon2id runs only here, never
+    /// per record.
+    ///
+    /// # Parameters
+    /// - `password`: the passphrase (must be non-empty).
+    /// - `salt`: the per-context salt (must be exactly [`crate::SALT_LEN`] bytes;
+    ///   obtain it from `generate_salt()`).
+    ///
+    /// # Returns
+    /// The [`Zeroizing`]-wrapped 32-byte master secret (wiped on drop).
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `password` is empty or `salt` is not
+    /// [`crate::SALT_LEN`] bytes; [`CryptoError::KeyDerivation`] if Argon2id
+    /// fails internally.
+    pub fn derive_key(&self, password: &str, salt: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        if password.is_empty() {
+            return Err(CryptoError::InvalidInput(
+                "password must not be empty".into(),
+            ));
+        }
+        if salt.len() != SALT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "salt must be exactly {SALT_LEN} bytes, got {}",
+                salt.len()
+            )));
+        }
+        self.kdf.derive_master(password.as_bytes(), salt)
+    }
+
+    /// Encrypts and authenticates `pt` into a base64 blob — the shared byte core
+    /// behind the public UTF-8 and envelope front doors (SR-C1/C3/C4, SR-R4).
+    ///
+    /// Pipeline: bound the plaintext size (SR-R4) → HKDF-expand the AEAD sub-key
+    /// (SR-C3) → sample a fresh nonce (SR-C1) → AES-256-GCM-SIV encrypt with the
+    /// `version ‖ plaintext_len` header bound as **AAD** (SR-C4) → wrap
+    /// `nonce ‖ ciphertext ‖ tag` in the FEC envelope (header also *inside* the
+    /// FEC, SR-R1) → base64 (standard alphabet).
+    ///
+    /// # Parameters
+    /// - `master`: the session master from [`derive_key`](Self::derive_key)
+    ///   (HKDF-expanded internally — never a raw AES key).
+    /// - `pt`: the plaintext bytes (`≤ `[`crate::MAX_PLAINTEXT_LEN`]).
+    ///
+    /// # Returns
+    /// The base64-encoded blob.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `pt` exceeds the plaintext cap;
+    /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
+    /// nonce sampling or AEAD failure.
+    // Byte core: the shared pipeline behind the public UTF-8 / envelope front
+    // doors. Its (and `decrypt_bytes`') only non-test callers are added by Task
+    // 17 (`encrypt_with_key`) / Task 18 (`wrap_key`); until then it is exercised
+    // by the byte-core tests. Remove this `allow` when Task 17 lands.
+    #[allow(dead_code)]
+    fn encrypt_bytes(&self, master: &[u8], pt: &[u8]) -> Result<String> {
+        // SR-R4: reject an over-cap plaintext before doing any work.
+        if pt.len() > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "plaintext length {} exceeds MAX_PLAINTEXT_LEN ({MAX_PLAINTEXT_LEN})",
+                pt.len()
+            )));
+        }
+        // SR-C3: HKDF-expand the master into the AEAD sub-key.
+        let aead_key = expand_aead_key(master)?;
+        // SR-C1: a fresh per-record nonce from OsRng.
+        let nonce = sample_nonce()?;
+        // Header = version ‖ plaintext_len (LE): bound as AAD (SR-C4) and, via
+        // encode_blob, also the first bytes of the FEC-protected payload (SR-R1).
+        let plaintext_len = pt.len() as u32;
+        let mut header = [0u8; HEADER_LEN];
+        header[0] = BLOB_VERSION;
+        header[1..].copy_from_slice(&plaintext_len.to_le_bytes());
+        // SR-C4: encrypt with the header bound as additional authenticated data.
+        let ct = self.cipher.encrypt(&aead_key, &nonce, &header, pt)?;
+        // body = nonce ‖ ciphertext ‖ tag.
+        let mut body = Vec::with_capacity(NONCE_LEN + ct.len());
+        body.extend_from_slice(&nonce);
+        body.extend_from_slice(&ct);
+        // FEC-encode (header lives inside the FEC) then base64-encode.
+        let blob = encode_blob(self.fec.as_ref(), BLOB_VERSION, plaintext_len, &body);
+        Ok(STANDARD.encode(&blob))
+    }
+
+    /// Decrypts and verifies a base64 blob produced by
+    /// [`encrypt_bytes`](Self::encrypt_bytes), returning the plaintext in a
+    /// [`Zeroizing`] buffer (SR-C8, SR-R4/R6).
+    ///
+    /// **Pinned ordering (SR-R4/R6 safety-critical):** cap the base64 length
+    /// *before* decode allocates (pre-allocation DoS guard) → strict base64
+    /// decode → `decode_blob` (structural validation, FEC-correct, recover the
+    /// error-corrected header) → reconstruct the AAD from the **recovered**
+    /// header → AEAD-open. The AAD passed to open is always the error-corrected
+    /// header, never a raw one.
+    ///
+    /// # Parameters
+    /// - `master`: the session master from [`derive_key`](Self::derive_key).
+    /// - `b64`: the base64 blob (`≤ `[`crate::MAX_B64_LEN`] characters).
+    ///
+    /// # Returns
+    /// The recovered plaintext in a [`Zeroizing`] buffer (wiped on drop).
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if the base64 or decoded blob is oversized
+    /// or structurally malformed; [`CryptoError::Encoding`] on non-canonical
+    /// base64; [`CryptoError::ErrorCorrection`] beyond FEC capacity;
+    /// [`CryptoError::Cipher`] if the AEAD tag fails (wrong master, wrong AAD, or
+    /// tampering beyond FEC capacity). **Never panics** on adversarial input.
+    // Byte core: see `encrypt_bytes`. Non-test callers arrive with Task 17/18;
+    // remove this `allow` then.
+    #[allow(dead_code)]
+    fn decrypt_bytes(&self, master: &[u8], b64: &str) -> Result<Zeroizing<Vec<u8>>> {
+        // (1) SR-R4: cap the base64 length BEFORE base64-decode allocates.
+        if b64.len() > MAX_B64_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "base64 input length {} exceeds MAX_B64_LEN ({MAX_B64_LEN})",
+                b64.len()
+            )));
+        }
+        // (2) Strict base64 decode — the STANDARD engine rejects a bad alphabet,
+        // non-canonical padding, and trailing bits.
+        let decoded = STANDARD
+            .decode(b64)
+            .map_err(|e| CryptoError::Encoding(format!("base64 decode failed: {e}")))?;
+        // (3) Structural validation + FEC-correct + recover the header (SR-R3/R6).
+        let (version, plaintext_len, body) = decode_blob(self.fec.as_ref(), &decoded)?;
+        // (4) SR-R6: reconstruct the AAD from the *error-corrected* header.
+        let mut header = [0u8; HEADER_LEN];
+        header[0] = version;
+        header[1..].copy_from_slice(&plaintext_len.to_le_bytes());
+        // body = nonce ‖ ciphertext ‖ tag. `decode_blob` guarantees
+        // body.len() >= NONCE_LEN + TAG_LEN, but guard so no slice can panic.
+        if body.len() < NONCE_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "recovered body {} shorter than a {NONCE_LEN}-byte nonce",
+                body.len()
+            )));
+        }
+        let (nonce, ct) = body.split_at(NONCE_LEN);
+        // (5) SR-C3/C4/C8: HKDF the AEAD key, open with the recovered header as
+        // AAD, return the plaintext zeroized on drop.
+        let aead_key = expand_aead_key(master)?;
+        let pt = self.cipher.decrypt(&aead_key, nonce, &header, ct)?;
+        Ok(Zeroizing::new(pt))
+    }
+}
+
+impl Default for CryptoVault {
+    /// Wires the audited defaults: Argon2id + AES-256-GCM-SIV + the concatenated
+    /// FEC ([`ConcatenatedFec::default`]).
+    fn default() -> Self {
+        Self::new(
+            Box::new(Argon2Kdf),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(ConcatenatedFec::default()),
+        )
+    }
+}
+
 #[cfg(test)]
 mod construction_tests {
     use super::{CryptoVault, NoFec};
