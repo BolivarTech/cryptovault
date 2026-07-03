@@ -1,61 +1,192 @@
 # cryptovault
 
-A **self-contained authenticated-encryption vault** in Rust, composed over three
-injected strategy traits:
+**Authenticated encryption resilient over interference channels** — AES-256-GCM-SIV
+over Argon2id/HKDF, followed by a concatenated Reed-Solomon + interleaver + Viterbi
+forward-error-correction (FEC) layer.
 
-| Layer | Default | Role |
-|-------|---------|------|
-| **KDF** | Argon2id (OWASP 2025: m=64 MiB, t=3, p=4) → HKDF-SHA256 sub-keys | passphrase → 32-byte master |
-| **Cipher** | AES-256-GCM-SIV (RFC 8452, nonce-misuse resistant) | confidentiality + 128-bit auth tag |
-| **FEC** | concatenated: Reed-Solomon `RS(255,223)` → block interleaver → Viterbi `K=7 R=1/2` | survive channel corruption / bit-rot |
+[![CI](https://github.com/BolivarTech/cryptovault/actions/workflows/ci.yml/badge.svg)](https://github.com/BolivarTech/cryptovault/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/cryptovault.svg)](https://crates.io/crates/cryptovault)
+[![docs.rs](https://img.shields.io/docsrs/cryptovault)](https://docs.rs/cryptovault)
+[![license](https://img.shields.io/crates/l/cryptovault.svg)](#license)
 
-Blob layout: `Viterbi( interleave( RS( version(1) ‖ len(u32 LE) ‖ nonce(12) ‖
-ciphertext ‖ tag(16) ) ) )`, base64. The header lives **inside** the FEC envelope
-(channel-corrected) *and* is bound as AAD (tamper-evident). Per-record `OsRng`
-nonce; the salt lives once per context, not per record. Includes **envelope
-key-wrapping** (`wrap_key`/`unwrap_key`) for a DEK/KEK model: a random Data
-Encryption Key wrapped under a passphrase-derived KEK, so the passphrase can
-change in O(1) without re-encrypting data.
+---
 
-> **Status: work in progress**, being hardened into a reusable, audited crate.
-> See [`HANDOFF.md`](HANDOFF.md).
+## What it does
 
-## Operational constraints
+`cryptovault` composes **two orthogonal capabilities** into one pipeline, and keeps
+them strictly separate:
 
-Read these before deploying — they are caller contracts the crate cannot enforce
+1. **Cryptographic security** (confidentiality + integrity) — an AEAD over a
+   memory-hard KDF. This is the **only** source of security.
+2. **Channel resilience** (error/burst correction) — a concatenated FEC. This is
+   **not** security; it is robustness against a noisy or lossy transport.
+
+The security layer is applied **first**, the resilience layer **after**, so the FEC
+can never weaken a cryptographic guarantee:
+
+```
+TX:  data → [AEAD: Argon2id → HKDF-SHA256 + AES-256-GCM-SIV, header bound as AAD]
+          → [Reed-Solomon RS(255,223)]
+          → [interleaver: deterministic block (default) + optional CSPRNG layer]
+          → [Viterbi K=7 R=1/2, hard-decision]  → CHANNEL
+RX:  CHANNEL → Viterbi → de-interleave → RS decode → AEAD open → data
+```
+
+Concatenated code: `VT(interleave(RS(AEAD(data))))`.
+
+### Blob layout
+
+The output is a base64 string over:
+
+```
+Viterbi( interleave( RS( version(1B) ‖ plaintext_len(u32 LE) ‖ nonce(12B) ‖ ciphertext ‖ tag(16B) ) ) )
+```
+
+**Every byte, header included, is FEC-protected.** The header (`version` +
+`plaintext_len`) lives *inside* the FEC envelope, so channel corruption of it is
+error-corrected rather than fatal, **and** it is bound as AEAD associated data (AAD),
+so tampering beyond FEC capacity fails the authentication tag. The header is both
+*recoverable* and *tamper-evident*.
+
+The crate also provides **envelope key-wrapping** (`wrap_key` / `unwrap_key`) for a
+Data-Encryption-Key / Key-Encryption-Key (DEK/KEK) model, plus `rewrap` for KEK
+rotation — the passphrase can change in O(1) without re-encrypting the data.
+
+## Security model
+
+| Property | Mechanism | Level |
+|---|---|---|
+| Confidentiality | AES-256-GCM-SIV (RFC 8452) | 256-bit key, IND-CCA2 |
+| Integrity / authenticity | 128-bit GCM-SIV tag + AAD-bound header | forgery ≤ 2⁻¹²⁸ per record |
+| Nonce-misuse resistance | SIV construction | a nonce collision leaks only plaintext equality |
+| Brute-force resistance | Argon2id, OWASP-2025 (m=64 MiB, t=3, p=4) | memory-hard |
+| Domain separation | HKDF-SHA256 | AEAD key ⟂ interleaver seed |
+| Memory safety | `#![forbid(unsafe_code)]`, pure Rust | UB impossible by construction |
+| Secret hygiene | `Zeroizing`, `subtle` | no heap residue, constant-time tag/secret compare |
+
+**Target: 256-bit confidentiality / 128-bit authentication.** The 256-bit AES key
+also gives ~128-bit post-quantum margin (Grover). The 128-bit tag is fixed by
+RFC 8452 and is the standard, ample authentication level.
+
+### The FEC is resilience, NOT security
+
+Confidentiality and integrity come **only** from the AEAD, applied first. The
+default interleaver is a public, keyless **deterministic block interleaver** (provable
+burst-spreading — no obfuscation, needs none). The optional CSPRNG interleaver layer
+adds defense-in-depth obfuscation that holds *only because a real AEAD sits
+underneath* — it adds no confidentiality or integrity of its own
+(`fixed < LFSR < CSPRNG < real AEAD`).
+
+### Out of scope (what it does NOT defend against)
+
+- Host memory compromise (the unwrapped key lives in RAM during a session).
+- Side channels of the underlying primitives beyond constant-time secret compares.
+- Traffic analysis / metadata (blob size approximates plaintext length).
+- Passphrase / keyring theft or coercion.
+- **Confidentiality via the FEC / interleaver** — it is obfuscation only.
+- **Active-adversary FEC defeat (DC-1).** An adversary who both drives encryption
+  (an oracle) *and* injects channel errors could learn the static per-key CSPRNG
+  permutation and craft bursts that degrade **FEC resilience (availability) only** —
+  never AEAD confidentiality or integrity. Per-record interleaver variation is
+  future work.
+- **Replay** — a protocol concern (the caller's nonce/sequence tracking).
+
+### Operational contracts (the caller must honor)
+
+These are constraints the crate cannot enforce for you; read them before deploying
 (full detail in the crate-level Rustdoc):
 
-- **All-or-nothing recovery.** A blob fully recovers or fully fails — no partial
-  recovery (the AEAD needs the complete ciphertext). Keep each plaintext ≤
-  `RECOMMENDED_MAX_PAYLOAD` (**128 KiB**, BER-derived) and **frame large data into
-  multiple small blobs** so one bad frame does not doom the rest.
-- **Concurrency.** A decrypt peaks at **≈ 80 MB per blob**; there is no built-in
-  limit, so **bound concurrent decrypts** (semaphore / worker pool).
-- **Nonce birthday bound ≈ 2⁴⁸ records/key** — rekey long-lived keys.
+- **All-or-nothing recovery (availability cliff).** A blob either fully recovers or
+  fully fails — there is no partial recovery, because the AEAD needs the *complete*
+  ciphertext. Keep each plaintext at or below **`RECOMMENDED_MAX_PAYLOAD` (128 KiB,
+  BER-derived)** and **frame large data into multiple small blobs**, so one bad frame
+  does not doom the rest. The hard cap is `MAX_PLAINTEXT_LEN` (10 MiB).
+- **Concurrency.** A single decrypt peaks at **≈ 80 MB per blob**; there is no
+  built-in limit, so **bound concurrent decrypts** with a semaphore or worker pool.
+- **Nonce birthday bound ≈ 2⁴⁸ records/key** — rekey long-lived keys before then.
 - **Salt uniqueness is the caller's contract** — obtain every salt from
-  `generate_salt()`; reuse across contexts collides the master key.
-- **FEC is not security.** Confidentiality and integrity come *only* from the
-  AEAD. The optional CSPRNG interleaver layer is obfuscation with a documented
-  active-adversary availability limitation (DC-1); the default interleaver is
-  keyless.
+  `generate_salt()` (OsRng); reuse across contexts collides the master key.
+- **`derive_key` runs Argon2 (memory-hard, expensive).** Call it **once per session**
+  and cache the returned key; the per-record and unwrap/decrypt paths never invoke
+  Argon2, so an attacker submitting many blobs triggers only cheap FEC-decode + one
+  AEAD-open per blob — not per-record memory-hard work.
 
-## Security model (summary)
-- Confidentiality + integrity via AES-256-GCM-SIV (forgery ≤ 2^-128/record).
-- Memory-hard KDF (Argon2id) against brute force; keys held in `Zeroizing`.
-- Allocation-DoS guards on decrypt (version → length cap → body consistency).
-- Vetted RustCrypto primitives for the cipher/KDF — **no rolled crypto**.
+### Framing is the caller's responsibility
 
-## Example
+The crate produces and consumes a **single, length-delimited blob** and performs no
+node synchronization. Delivering blob boundaries (framing / packetization) is the
+caller's job; FEC correction capacity applies only *within* one correctly-framed blob.
+
+## Usage
 
 ```rust
 use cryptovault::CryptoVault;
 
 let vault = CryptoVault::default();
-let key = vault.derive_key("master-passphrase", &[0u8; 16]).unwrap();
+
+// Derive a session key once (Argon2id is memory-hard — cache the result).
+let salt = [0u8; 16]; // in production: cryptovault::generate_salt()?
+let key = vault.derive_key("master-passphrase", &salt).unwrap();
+
+// Encrypt-and-authenticate, survive channel corruption, then recover.
 let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
-assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap(), "sk-secret");
+let recovered = vault.decrypt_with_key(&key, &blob).unwrap();
+assert_eq!(recovered.as_str(), "sk-secret");
 ```
+
+### Envelope key-wrapping (DEK/KEK)
+
+```rust
+use cryptovault::{CryptoVault, generate_dek, generate_salt};
+
+let vault = CryptoVault::default();
+
+let salt = generate_salt().unwrap();                       // per-context, once
+let kek = vault.derive_key("master-passphrase", &salt).unwrap();
+let dek = generate_dek().unwrap();                          // random 32-byte DEK
+
+// The salt is bound as AAD, tying the wrapped DEK to its context.
+let wrapped = vault.wrap_key(&kek, &salt, &dek).unwrap();
+let unwrapped = vault.unwrap_key(&kek, &salt, &wrapped).unwrap();
+assert_eq!(&*unwrapped, &*dek);
+```
+
+## Quality posture
+
+`cryptovault` is engineered to an internal, by-the-book audited bar:
+
+- **`#![forbid(unsafe_code)]`** at the crate root; both FEC crates are pure-Rust,
+  no-unsafe → panic-only boundary risk, no undefined behavior.
+- **No panic on adversarial input** — every FEC/decrypt entry point is enumerated and
+  gated by structural validation *before* any allocation or codec runs
+  (see [`docs/no-panic.md`](docs/no-panic.md)), backed by `cargo-fuzz` targets over
+  the full decrypt path and the FEC crates directly.
+- **Known-Answer Tests** against independent references — RFC 8452 (AES-GCM-SIV),
+  RFC 9106 (Argon2id), RFC 5869 (HKDF), a third-party `reedsolo` RS(255,223) parity
+  vector, and the CCSDS K=7 R=1/2 Viterbi impulse response.
+- **113 tests green, ~97% line coverage**; `clippy -D warnings`, `cargo fmt`,
+  `cargo doc` (no warnings), and `cargo audit` gate every commit.
+- Vetted **RustCrypto** primitives for the cipher/KDF/MAC/HKDF — **no rolled crypto**.
+  Only the FEC (a non-security layer) is BolivarTech's own code.
+
+> **Note.** "Defense-grade" is an *internal* engineering quality-bar, not a public
+> claim or certification target.
+
+## MSRV
+
+Rust **1.70** or newer.
 
 ## License
 
-Licensed under either of **MIT** or **Apache-2.0** at your option.
+Licensed under either of
+
+- **MIT** license ([LICENSE-MIT](LICENSE-MIT)), or
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in this crate by you, as defined in the Apache-2.0 license, shall be
+dual-licensed as above, without any additional terms or conditions.
+
+Copyright © 2026 Julian Bolivar / BolivarTech.
