@@ -168,6 +168,14 @@ mod tests {
     }
 
     #[test]
+    fn test_sr_c1_nonce_is_random_and_sized() {
+        let a = sample_nonce().unwrap();
+        let b = sample_nonce().unwrap();
+        assert_eq!(a.len(), NONCE_LEN);
+        assert_ne!(a, b, "OsRng must not return a repeating/zero nonce");
+    }
+
+    #[test]
     fn test_sr_c1_wrong_key_and_nonce_length_are_typed_not_panic() {
         let c = Aes256GcmSivCipher;
         // Wrong-length key/nonce must be rejected as a typed error, never panic.
