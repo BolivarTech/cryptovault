@@ -1,0 +1,26 @@
+# xtask automation crate for cryptovault — SR-F5 external-FEC-review release gate.
+#
+# This is a SEPARATE workspace (empty [workspace] table below), mirroring
+# `fuzz/`, so `cargo build`, `cargo nextest`, `cargo clippy`, etc. run at the repo
+# root NEVER pull xtask into the main crate's §0.1 gates. It is std-only (no
+# dependencies) so it does not touch the audited dependency tree either.
+#
+# Run explicitly:  cargo run --manifest-path xtask/Cargo.toml -- review-gate
+[package]
+name = "xtask"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.70"
+authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
+description = "Repository automation tasks (release gates) for cryptovault."
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# Intentionally none: std-only keeps the audited dependency tree untouched.
+
+# Own workspace so the parent crate's gates never build xtask.
+[workspace]

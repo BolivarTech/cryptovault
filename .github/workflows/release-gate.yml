@@ -1,0 +1,24 @@
+# SR-F5 external-FEC-review release gate.
+#
+# Runs ONLY on `v*` tags. It fails the release build unless a signed FEC-review
+# artifact `docs/reviews/fec-<version>.signed.md` (with reviewer identity + date)
+# exists for the tagged crate version. An unenforced process gate is no gate:
+# this job blocks any `v*` tag that lacks the signed external review.
+#
+# The review is NOT waivable by a flag; a genuine waiver requires a documented
+# owner sign-off + rationale in the release notes (see docs/reviews/TEMPLATE.md).
+name: release-gate
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  fec-review-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Enforce signed external FEC review
+        run: cargo run --manifest-path xtask/Cargo.toml -- review-gate
