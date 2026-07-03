@@ -30,6 +30,60 @@
 //! backward compatibility. The blob header lives **inside** the FEC envelope.
 //! Framed delivery (splitting a stream into blobs) is the caller's job.
 //!
+//! # Operational constraints (read before deploying)
+//!
+//! These are contracts the crate cannot enforce for you. Review each before
+//! putting `cryptovault` on a real channel.
+//!
+//! ### All-or-nothing recovery — frame large data into small blobs
+//!
+//! FEC recovery is **all-or-nothing per blob**: if channel corruption exceeds the
+//! concatenated code's correction capacity *anywhere* in a blob, the **entire**
+//! blob fails to decrypt — there is **no partial recovery**, because the AEAD
+//! needs the complete ciphertext to verify its tag. Larger blobs are
+//! correspondingly more fragile (more bytes, more chances to exceed capacity).
+//!
+//! Keep each plaintext at or below [`RECOMMENDED_MAX_PAYLOAD`] (`128 KiB`, the
+//! BER-derived practical ceiling — see `docs/ber-analysis.md`). The absolute cap
+//! is [`MAX_PLAINTEXT_LEN`] (10 MiB), but blobs approaching it survive channel
+//! noise far less reliably. **Frame large data into multiple
+//! `RECOMMENDED_MAX_PAYLOAD`-sized blobs**: each frame then fails or recovers
+//! independently, so one bad frame does not doom the rest.
+//!
+//! ### Concurrency — bound your concurrent decrypts
+//!
+//! Decryption is memory-heavy: a single decrypt holds several O(blob)-sized
+//! buffers at once and **peaks at ≈ 80 MB per blob** at the 10 MiB cap. The vault
+//! is `Send + Sync` and has **no built-in concurrency limit**, so `N` concurrent
+//! decrypts consume ≈ `N × 80 MB`. **Callers MUST bound concurrent decrypts**
+//! (a semaphore or worker pool) or risk out-of-memory — concurrency policy is
+//! deliberately a caller/service-layer concern.
+//!
+//! ### Nonce birthday bound — rekey long-lived keys
+//!
+//! Each record draws a fresh 12-byte `OsRng` nonce. The birthday bound is
+//! ≈ **2⁴⁸ records per key**; GCM-SIV's misuse resistance means a collision only
+//! leaks plaintext *equality* (never the key or plaintext), but you SHOULD
+//! **rekey before encrypting > 2⁴⁸ records under one key**.
+//!
+//! ### Salt uniqueness is your contract
+//!
+//! The per-context Argon2 salt is **caller-managed and out-of-band** (never in the
+//! blob). Obtain every salt from [`vault::generate_salt`] (never hand-rolled) and
+//! use a **distinct salt per context**: reusing a salt yields the same master key
+//! across contexts (a key collision). The stateless crate cannot detect reuse.
+//!
+//! ### DC-1 — active-adversary FEC-availability limitation (optional layer only)
+//!
+//! The **default** deterministic block interleaver is public and keyless — no
+//! permutation oracle exists, so this limitation **does not apply**. It applies
+//! *only* when the **optional CSPRNG obfuscation layer** is enabled: that
+//! permutation is static per key (the nonce lives inside the FEC body, so
+//! per-record variation is impossible). An active adversary with an encryption
+//! oracle could learn it and craft bursts to degrade **FEC resilience
+//! (availability) only** — it **never** affects AEAD confidentiality or integrity.
+//! The interleaver is obfuscation, not security.
+//!
 //! See `sbtdd/spec-behavior.md` for the full specification.
 
 pub mod blob;
