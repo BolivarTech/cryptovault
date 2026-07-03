@@ -226,6 +226,44 @@ fn test_sr_r4_oversized_decoded_blob_rejected() {
     );
 }
 
+/// SR-R7: decode-path failures carry a fixed, **generic** message that leaks no
+/// structural oracle — no exact lengths/offsets (digits) and no FEC-crate-internal
+/// vocabulary (Reed-Solomon codeword counts, RS-stream lengths, Viterbi framing).
+/// An attacker probing malformed blobs learns only the failing *stage* (the typed
+/// variant is deliberately kept), never a structural specific.
+#[test]
+fn test_sr_r7_decode_errors_carry_no_structural_detail() {
+    let vault = CryptoVault::default();
+    // Malformed blobs whose rejection originates on the FEC / blob decode path
+    // (chunked-Viterbi framing, RS-stream framing, and the recovered-header
+    // version check) — each historically embedded exact lengths or FEC wording.
+    let malformed: [Vec<u8>; 3] = [
+        vec![0u8; 203],    // odd body → invalid chunked-Viterbi frame
+        vec![0u8; 202],    // valid frame, derived RS-stream length is no codeword multiple
+        vec![0x00u8; 512], // clean frame → all-zero RS codeword → bad recovered version
+    ];
+    // Substrings that would betray FEC/structural internals to a probing attacker.
+    const BANNED_WORDS: [&str; 6] = ["255", "codeword", "rs-stream", "viterbi", "reed", "chunk"];
+    for blob in malformed {
+        let b64 = STANDARD.encode(&blob);
+        let err = vault
+            .unwrap_key(&MASTER, &[], &b64)
+            .expect_err("a malformed blob must be rejected");
+        let msg = err.to_string();
+        let lower = msg.to_lowercase();
+        assert!(
+            !msg.chars().any(|c| c.is_ascii_digit()),
+            "decode error must not embed any length/offset digit, got: {msg}"
+        );
+        for banned in BANNED_WORDS {
+            assert!(
+                !lower.contains(banned),
+                "decode error must not leak FEC-internal term '{banned}', got: {msg}"
+            );
+        }
+    }
+}
+
 /// SR-R4: the off-by-one boundary — a decoded blob of exactly `MAX_BLOB_LEN + 1`
 /// bytes is rejected (the cap is a strict `>`), never a panic or over-allocation.
 #[test]
