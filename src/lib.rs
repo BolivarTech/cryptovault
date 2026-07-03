@@ -108,13 +108,17 @@ pub const ARGON2_P: u32 = 4;
 /// (real, non-zero) so the allocation-DoS guard is functional from Task 0.
 ///
 /// Derivation: the protected payload (header ‖ nonce ‖ max ciphertext ‖ tag) is
-/// Reed-Solomon expanded by `RS_BLOCK / RS_DATA`, then Viterbi expanded by `2×`
-/// plus the zero-tail [`TERMINATION_OVERHEAD`].
+/// Reed-Solomon expanded by `RS_BLOCK / RS_DATA`, then the Viterbi inner code
+/// doubles the stream and appends **one [`TERMINATION_OVERHEAD`] zero-tail per
+/// [`VITERBI_CHUNK`] sub-block** (the `viterbi` 0.0.1 block cap forces chunking —
+/// P0-3 / P0-5): `rs_max·2 + TERMINATION_OVERHEAD·ceil(rs_max / VITERBI_CHUNK)`.
 pub const MAX_BLOB_LEN: usize = {
     let protected_max = MAX_PLAINTEXT_LEN + HEADER_LEN + NONCE_LEN + TAG_LEN;
     // Ceil-div written out (const-safe on MSRV 1.70; `div_ceil` is 1.73+).
     let rs_blocks = (protected_max + RS_DATA - 1) / RS_DATA;
-    rs_blocks * RS_BLOCK * 2 + TERMINATION_OVERHEAD
+    let rs_max = rs_blocks * RS_BLOCK;
+    let viterbi_chunks = (rs_max + VITERBI_CHUNK - 1) / VITERBI_CHUNK;
+    rs_max * 2 + TERMINATION_OVERHEAD * viterbi_chunks
 };
 
 /// Maximum accepted base64 input length — caps allocation **before** decode

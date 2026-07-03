@@ -5,20 +5,175 @@
 //! `viterbi` 0.0.1 crate — CCSDS `K=7, R=1/2` hard-decision convolutional code
 //! (SR-F3 / P0-3).
 
-use crate::error::Result;
+use viterbi::{CcsdsViterbiDecoder, CodeParams, CodedBlock, DecodeError};
+
+use crate::error::{CryptoError, Result};
+use crate::VITERBI_CHUNK;
+
+/// Zero-tail overhead of a single Viterbi sub-block (`2L + 2` ⇒ `+2` bytes).
+///
+/// Named locally to keep the length arithmetic self-documenting; equal to the
+/// crate-level [`crate::TERMINATION_OVERHEAD`].
+const TAIL_BYTES: usize = crate::TERMINATION_OVERHEAD;
+
+/// Coded-body length (bytes) of one **full** `VITERBI_CHUNK` sub-block.
+///
+/// Viterbi rate-1/2 with a 6-bit zero tail maps `L` info bytes to `2L + 2`
+/// coded bytes (the final byte is padded by exactly 4 bits — see
+/// [`coded_nbits`]). A full chunk therefore occupies `2·VITERBI_CHUNK + 2`
+/// bytes on the wire; every chunk but the last has exactly this length, which is
+/// what lets the receiver reconstruct the chunk boundaries from the framed body
+/// length alone.
+const FULL_CHUNK_BODY: usize = 2 * VITERBI_CHUNK + TAIL_BYTES;
+
+/// Minimum valid coded-body length (bytes): the smallest chunk encodes one info
+/// byte as `2·1 + 2 = 4` coded bytes.
+const MIN_CHUNK_BODY: usize = 2 + TAIL_BYTES;
+
+/// Exact coded bit count of a `body_len`-byte Viterbi sub-block.
+///
+/// For `il` info bytes the encoder emits `(8·il + 6)·2 = 16·il + 12` coded bits
+/// packed into `2·il + 2` bytes, so the final byte always carries exactly 4
+/// padding bits. Inverting `body_len = 2·il + 2` gives `nbits = 8·body_len − 4`,
+/// the value [`viterbi::CcsdsViterbiDecoder::decode_block`] needs to recover the
+/// info length. `body_len` is a caller-validated even value `≥ MIN_CHUNK_BODY`.
+const fn coded_nbits(body_len: usize) -> usize {
+    8 * body_len - 4
+}
 
 /// CCSDS `K=7, R=1/2` hard-decision Viterbi inner code (SR-F3 / P0-3).
+///
+/// The innermost stage of the concatenated FEC: it wraps the author's own
+/// `viterbi` 0.0.1 crate, adding **chunking** so a full-payload Reed-Solomon
+/// stream (which exceeds the crate's single-block cap of
+/// `MAX_SUPPORTED_INFO_BITS = 1_000_000` bits) is encoded in fixed
+/// [`VITERBI_CHUNK`]-byte sub-blocks and mapping the crate's typed errors onto
+/// the vault's [`CryptoError`] domain (never a panic on adversarial input).
+///
+/// A fieldless strategy struct — construct it directly (`ViterbiCodec`); it
+/// holds no state. The pair is symmetric: [`encode`](Self::encode) is inverted
+/// by [`decode`](Self::decode).
 pub struct ViterbiCodec;
 
 impl ViterbiCodec {
-    /// STUB (RED) — Viterbi-encodes an RS stream (not yet implemented).
-    pub fn encode(&self, _rs_stream: &[u8]) -> Vec<u8> {
-        Vec::new()
+    /// Viterbi-encodes `rs_stream` in [`VITERBI_CHUNK`]-byte sub-blocks,
+    /// concatenating the per-chunk coded bodies (SR-F3).
+    ///
+    /// This is the transmit (encrypt-side) path over the caller's own data, so
+    /// it is infallible by contract. Each chunk is at most `VITERBI_CHUNK` bytes
+    /// (`999_600` info bits) — well under the crate's `1_000_000`-bit cap — so
+    /// the only residual failure the backing encoder can report is an OOM
+    /// allocation, treated as statically unreachable here (the RS stream is
+    /// already held in memory and capped at [`crate::MAX_BLOB_LEN`]).
+    ///
+    /// # Parameters
+    /// - `rs_stream`: the interleaved Reed-Solomon stream to protect.
+    ///
+    /// # Returns
+    /// The concatenated coded stream, length `2·rs_stream.len() + 2·num_chunks`
+    /// where `num_chunks = ceil(rs_stream.len() / VITERBI_CHUNK)` (empty in, empty
+    /// out).
+    pub fn encode(&self, rs_stream: &[u8]) -> Vec<u8> {
+        let encoder = viterbi::ViterbiEncoder::new(CodeParams::ccsds_r1_2())
+            // Statically valid: `ccsds_r1_2()` is a fixed, well-formed profile.
+            .expect("CCSDS K=7 R=1/2 parameters are statically valid");
+        let mut out = Vec::new();
+        for chunk in rs_stream.chunks(VITERBI_CHUNK) {
+            let coded = encoder
+                .encode(chunk)
+                // Unreachable: `chunk.len() <= VITERBI_CHUNK`, i.e. `999_600`
+                // info bits < the crate's `1_000_000`-bit cap; the only other
+                // error is OOM on an already-held, length-capped buffer.
+                .expect("chunk is within MAX_SUPPORTED_INFO_BITS");
+            out.extend_from_slice(&coded.bytes);
+        }
+        out
     }
 
-    /// STUB (RED) — inverts [`encode`](Self::encode) (not yet implemented).
-    pub fn decode(&self, _blob_body: &[u8]) -> Result<Vec<u8>> {
-        Ok(Vec::new())
+    /// Viterbi-decodes `blob_body`, inverting [`encode`](Self::encode) and
+    /// returning the recovered Reed-Solomon stream (SR-F3 / P0-3).
+    ///
+    /// The chunk structure is derived from the framed body length alone: every
+    /// sub-block but the last is exactly `2·VITERBI_CHUNK + 2` bytes, and the
+    /// final (possibly shorter) sub-block carries the remainder. Hard-decision
+    /// Viterbi is correction-only — an uncorrectable channel yields *wrong* bytes
+    /// here, which the downstream Reed-Solomon and AEAD layers reject (the AEAD
+    /// tag is the final integrity anchor); this stage errors only on a
+    /// structurally malformed body or a backing-codec boundary failure.
+    ///
+    /// # Parameters
+    /// - `blob_body`: the received, possibly-corrupted coded stream.
+    ///
+    /// # Returns
+    /// The recovered RS stream (empty in, empty out).
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidInput`] if `blob_body`'s length is inconsistent
+    ///   with the per-chunk coded formula (the final sub-block is not a valid
+    ///   `2·il + 2` coded body) — rejected before the codec runs, never a panic.
+    /// - [`CryptoError::ErrorCorrection`] if the backing decoder reports an
+    ///   allocation failure.
+    pub fn decode(&self, blob_body: &[u8]) -> Result<Vec<u8>> {
+        if blob_body.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bodies = chunk_body_lengths(blob_body.len())?;
+        let mut decoder = CcsdsViterbiDecoder::new(CodeParams::ccsds_r1_2(), VITERBI_CHUNK * 8)
+            // Statically valid: `VITERBI_CHUNK * 8 = 999_600 <= 1_000_000`.
+            .expect("max_info_bits is within MAX_SUPPORTED_INFO_BITS");
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        for body_len in bodies {
+            let coded = CodedBlock {
+                bytes: blob_body[offset..offset + body_len].to_vec(),
+                nbits: coded_nbits(body_len),
+            };
+            let decoded = decoder.decode_block(&coded).map_err(map_decode_error)?;
+            out.extend_from_slice(&decoded.bytes);
+            offset += body_len;
+        }
+        Ok(out)
+    }
+}
+
+/// Reconstructs the per-chunk coded-body lengths from the total framed body
+/// length (SR-F3 / SR-R2 — no bootstrapping on the still-encoded header).
+///
+/// All sub-blocks but the last are [`FULL_CHUNK_BODY`] bytes; the final one is
+/// the remainder, which must be a valid coded body (even, `≥ MIN_CHUNK_BODY`).
+///
+/// # Errors
+/// [`CryptoError::InvalidInput`] if the remainder is not a structurally valid
+/// final coded body.
+fn chunk_body_lengths(total: usize) -> Result<Vec<usize>> {
+    let full = total / FULL_CHUNK_BODY;
+    let rem = total % FULL_CHUNK_BODY;
+    let mut bodies = vec![FULL_CHUNK_BODY; full];
+    if rem != 0 {
+        if rem < MIN_CHUNK_BODY || rem % 2 != 0 {
+            return Err(CryptoError::InvalidInput(format!(
+                "Viterbi body length {total} has an invalid final chunk of {rem} bytes"
+            )));
+        }
+        bodies.push(rem);
+    }
+    Ok(bodies)
+}
+
+/// Maps a `viterbi` 0.0.1 [`DecodeError`] onto the vault's typed error domain.
+///
+/// A structural length inconsistency (`LengthMismatch` / `InputTooLong`) is
+/// surfaced as [`CryptoError::InvalidInput`]; an allocation failure as
+/// [`CryptoError::ErrorCorrection`]. No decode error carries codec-internal
+/// detail (SR-R7).
+fn map_decode_error(e: DecodeError) -> CryptoError {
+    match e {
+        DecodeError::LengthMismatch | DecodeError::InputTooLong { .. } => {
+            CryptoError::InvalidInput("Viterbi coded body is structurally inconsistent".into())
+        }
+        DecodeError::AllocationFailed => {
+            CryptoError::ErrorCorrection("Viterbi decode allocation failed".into())
+        }
     }
 }
 
