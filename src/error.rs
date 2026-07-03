@@ -75,4 +75,37 @@ mod tests {
         assert!(e.to_string().to_lowercase().contains("invalid"));
         assert!(matches!(e, CryptoError::InvalidInput(_)));
     }
+
+    #[test]
+    fn test_sr_r7_every_variant_display_prefix_and_message() {
+        // Exercise the Display arm of every variant (SR-R7): each names its
+        // failing stage and echoes its message, none leaks an oracle.
+        let cases = [
+            (
+                CryptoError::KeyDerivation("k".into()),
+                "Key derivation error: k",
+            ),
+            (CryptoError::Cipher("c".into()), "Cipher error: c"),
+            (
+                CryptoError::ErrorCorrection("e".into()),
+                "Error correction error: e",
+            ),
+            (CryptoError::Encoding("b".into()), "Encoding error: b"),
+            (CryptoError::InvalidInput("i".into()), "Invalid input: i"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+            // `std::error::Error` is implemented (no source, no panic).
+            let dyn_err: &dyn std::error::Error = &err;
+            assert!(dyn_err.source().is_none());
+        }
+    }
+
+    #[test]
+    fn test_sr_r7_variants_are_clone_debug_and_eq() {
+        let e = CryptoError::Cipher("tag".into());
+        assert_eq!(e.clone(), e);
+        assert_ne!(e, CryptoError::Encoding("tag".into()));
+        assert!(format!("{e:?}").contains("Cipher"));
+    }
 }
