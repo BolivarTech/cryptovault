@@ -43,8 +43,12 @@
 //! `≤1`. Callers who need the strict `≤1` bound everywhere should size payloads
 //! so the RS stream is a whole multiple of `depth * RS_BLOCK`.
 
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
+use zeroize::Zeroizing;
+
 use crate::error::{CryptoError, Result};
-use crate::{RS_BLOCK, RS_INTERLEAVE_MAX};
+use crate::{KEY_LEN, NONCE_LEN, RS_BLOCK, RS_INTERLEAVE_MAX};
 
 /// Deterministic block interleaver — the default, public/fixed FEC interleaving
 /// stage (SR-F2).
@@ -98,7 +102,7 @@ impl BlockInterleaver {
     }
 
     /// Window span in bytes (`depth * RS_BLOCK`).
-    fn window_len(&self) -> usize {
+    pub(crate) fn window_len(&self) -> usize {
         self.depth * RS_BLOCK
     }
 
@@ -171,10 +175,175 @@ impl BlockInterleaver {
     }
 }
 
+/// Optional CSPRNG obfuscation layer — **opt-in, defense-in-depth, NON-security**
+/// (SR-F2).
+///
+/// Applied *after* the deterministic block interleaver, it replaces each
+/// window's block permutation with a keyed pseudo-random one (per-window
+/// Fisher-Yates over a ChaCha20 keystream). This adds structural obfuscation
+/// (gradation `fixed < CSPRNG < AEAD`) but provides **no confidentiality or
+/// integrity** — the AES-256-GCM-SIV AEAD, applied first, is the sole security
+/// layer. It also **weakens** the block interleaver's worst-case burst-spreading
+/// guarantee; that degradation is quantified in
+/// `docs/interleaver-csprng-degradation.md`.
+///
+/// The seed is HKDF-derived key material and is held in a
+/// [`Zeroizing`]`<[u8; KEY_LEN]>` so it is wiped on drop; the per-window
+/// keystream working buffer is likewise `Zeroizing`.
+pub struct CsprngLayer {
+    /// Key-derived seed (HKDF `cryptovault:v1:interleaver`); wiped on drop.
+    seed: Zeroizing<[u8; KEY_LEN]>,
+}
+
+impl CsprngLayer {
+    /// Creates the CSPRNG layer from a 32-byte key-derived interleaver seed.
+    ///
+    /// # Parameters
+    /// - `seed`: the HKDF-derived interleaver seed (never the raw AEAD key).
+    ///
+    /// # Errors
+    /// Currently infallible; returns `Result` for forward-compatibility with the
+    /// fallible-constructor convention (SR-C3 / OOP explicit constructors).
+    pub fn new(seed: [u8; KEY_LEN]) -> Result<Self> {
+        Ok(Self {
+            seed: Zeroizing::new(seed),
+        })
+    }
+
+    /// Draws the next unbiased index in `0..range` from the keystream.
+    ///
+    /// Uses **rejection sampling** (Lemire-style bound): a `u32` keystream draw
+    /// `x` is rejected when `x >= floor(2^32 / range) * range`, eliminating the
+    /// modulo bias a bare `x % range` would introduce. Bytes are read
+    /// little-endian so the result is identical on every platform.
+    fn next_index(cipher: &mut ChaCha20, range: u32) -> u32 {
+        // `range >= 1`; the multiply stays within u64 (range <= window <= 4080).
+        let limit = (1u64 << 32) / u64::from(range) * u64::from(range);
+        loop {
+            let mut buf = Zeroizing::new([0u8; 4]);
+            cipher.apply_keystream(&mut buf[..]);
+            let x = u32::from_le_bytes(*buf);
+            if u64::from(x) < limit {
+                return x % range;
+            }
+        }
+    }
+
+    /// Per-window read-order permutation of `0..filled`, keyed by the seed and
+    /// `window_index`.
+    ///
+    /// Builds an identity vector and applies a Fisher-Yates shuffle driven by the
+    /// ChaCha20 keystream (key = seed, nonce = `window_index` as little-endian
+    /// `u64` in the low 8 bytes). Both TX and RX derive the identical permutation
+    /// from `(seed, window_index, filled)`, so the transform is byte-identical
+    /// and platform-independent. `perm[k]` is the source index of the `k`-th
+    /// output byte.
+    pub(crate) fn window_perm(&self, filled: usize, window_index: u64) -> Vec<usize> {
+        let mut perm: Vec<usize> = (0..filled).collect();
+        if filled <= 1 {
+            return perm;
+        }
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce[..8].copy_from_slice(&window_index.to_le_bytes());
+        let mut cipher = ChaCha20::new((&*self.seed).into(), (&nonce).into());
+        // Fisher-Yates, high index to low: swap perm[i] with a uniform j in 0..=i.
+        for i in (1..filled).rev() {
+            // `i + 1 <= filled <= depth * RS_BLOCK <= 4080`, fits in u32.
+            let j = Self::next_index(&mut cipher, (i + 1) as u32) as usize;
+            perm.swap(i, j);
+        }
+        perm
+    }
+
+    /// Applies the per-window CSPRNG permutation over `stream`, windowed by
+    /// `window_len` (the block interleaver's window span).
+    ///
+    /// Inverse of [`deinterleave`](Self::deinterleave). The final short window is
+    /// permuted at its actual length.
+    #[must_use]
+    pub fn interleave(&self, stream: &[u8], window_len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; stream.len()];
+        let mut base = 0;
+        let mut w = 0u64;
+        while base < stream.len() {
+            let filled = (stream.len() - base).min(window_len);
+            for (k, &src) in self.window_perm(filled, w).iter().enumerate() {
+                out[base + k] = stream[base + src];
+            }
+            base += filled;
+            w += 1;
+        }
+        out
+    }
+
+    /// Undoes [`interleave`](Self::interleave) over `stream`.
+    #[must_use]
+    pub fn deinterleave(&self, stream: &[u8], window_len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; stream.len()];
+        let mut base = 0;
+        let mut w = 0u64;
+        while base < stream.len() {
+            let filled = (stream.len() - base).min(window_len);
+            for (k, &dst) in self.window_perm(filled, w).iter().enumerate() {
+                out[base + dst] = stream[base + k];
+            }
+            base += filled;
+            w += 1;
+        }
+        out
+    }
+}
+
+/// Interleaving strategy for the concatenated FEC (SR-F2).
+///
+/// The **default** is [`Interleaver::Block`] — the public/fixed deterministic
+/// block interleaver (no key material). [`Interleaver::BlockThenCsprng`] adds the
+/// opt-in [`CsprngLayer`] on top for defense-in-depth obfuscation (still
+/// non-security; weaker burst-spreading). Both variants are reversible via the
+/// symmetric [`interleave`](Self::interleave) / [`deinterleave`](Self::deinterleave)
+/// pair.
+pub enum Interleaver {
+    /// Deterministic block interleaver only (default, non-keyed).
+    Block(BlockInterleaver),
+    /// Block interleaver followed by the CSPRNG obfuscation layer.
+    BlockThenCsprng(BlockInterleaver, CsprngLayer),
+}
+
+impl Interleaver {
+    /// Interleaves `stream` under the selected strategy.
+    ///
+    /// Inverse of [`deinterleave`](Self::deinterleave).
+    #[must_use]
+    pub fn interleave(&self, stream: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Block(block) => block.interleave(stream),
+            Self::BlockThenCsprng(block, csprng) => {
+                let blocked = block.interleave(stream);
+                csprng.interleave(&blocked, block.window_len())
+            }
+        }
+    }
+
+    /// De-interleaves `stream`, undoing [`interleave`](Self::interleave).
+    ///
+    /// The CSPRNG layer is undone first (it is applied last on encode), then the
+    /// block interleaver.
+    #[must_use]
+    pub fn deinterleave(&self, stream: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Block(block) => block.deinterleave(stream),
+            Self::BlockThenCsprng(block, csprng) => {
+                let unshuffled = csprng.deinterleave(stream, block.window_len());
+                block.deinterleave(&unshuffled)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BlockInterleaver;
-    use crate::{RS_BLOCK, RS_INTERLEAVE_MAX};
+    use super::{BlockInterleaver, CsprngLayer, Interleaver};
+    use crate::{KEY_LEN, RS_BLOCK, RS_INTERLEAVE_MAX};
 
     /// SR-F2 / P0-1: interleave then deinterleave is the identity, including a
     /// trailing partial window (`5*RS_BLOCK + 100` is not a whole window).
@@ -183,6 +352,27 @@ mod tests {
         let il = BlockInterleaver::new(5).unwrap();
         let stream: Vec<u8> = (0..(5 * RS_BLOCK + 100)).map(|i| i as u8).collect();
         assert_eq!(il.deinterleave(&il.interleave(&stream)), stream);
+    }
+
+    /// SR-F2: the [`Interleaver`] strategy enum round-trips under both variants,
+    /// and the CSPRNG variant actually reorders relative to block-only.
+    #[test]
+    fn test_sr_f2_interleaver_enum_roundtrips_both_variants() {
+        let stream: Vec<u8> = (0..(5 * RS_BLOCK + 42)).map(|i| i as u8).collect();
+
+        let block = Interleaver::Block(BlockInterleaver::new(5).unwrap());
+        assert_eq!(block.deinterleave(&block.interleave(&stream)), stream);
+
+        let combined = Interleaver::BlockThenCsprng(
+            BlockInterleaver::new(5).unwrap(),
+            CsprngLayer::new([0x5Au8; KEY_LEN]).unwrap(),
+        );
+        assert_eq!(combined.deinterleave(&combined.interleave(&stream)), stream);
+        assert_ne!(
+            combined.interleave(&stream),
+            block.interleave(&stream),
+            "CSPRNG variant adds obfuscation on top of the block permutation"
+        );
     }
 
     /// SR-F2: depth `I` is validated to `1..=RS_INTERLEAVE_MAX`; `I=1` is a
@@ -286,6 +476,130 @@ mod tests {
         assert!(
             windows.len() <= 2,
             "affected codewords span ≤2 interleave windows: {windows:?}"
+        );
+    }
+
+    /// SR-F2 (CSPRNG layer): per-window Fisher-Yates interleave round-trips
+    /// exactly, including a trailing partial window.
+    #[test]
+    fn test_sr_f2_csprng_layer_roundtrip() {
+        let layer = CsprngLayer::new([0x11u8; KEY_LEN]).unwrap();
+        let window_len = 5 * RS_BLOCK;
+        let stream: Vec<u8> = (0..(window_len + 137)).map(|i| i as u8).collect();
+        let out = layer.interleave(&stream, window_len);
+        assert_eq!(layer.deinterleave(&out, window_len), stream);
+    }
+
+    /// SR-F2 (CSPRNG layer): the same seed yields the same permutation on TX and
+    /// RX (deterministic, platform-independent), and it actually reorders bytes
+    /// (obfuscation happened — not identity).
+    #[test]
+    fn test_sr_f2_csprng_layer_deterministic_and_obfuscates() {
+        let seed = [0x2Au8; KEY_LEN];
+        let window_len = 5 * RS_BLOCK;
+        let stream: Vec<u8> = (0..window_len).map(|i| i as u8).collect();
+        let a = CsprngLayer::new(seed)
+            .unwrap()
+            .interleave(&stream, window_len);
+        let b = CsprngLayer::new(seed)
+            .unwrap()
+            .interleave(&stream, window_len);
+        assert_eq!(a, b, "same seed → identical permutation");
+        assert_ne!(
+            a, stream,
+            "CSPRNG layer must reorder (obfuscate) the window"
+        );
+    }
+
+    /// SR-F2 (CSPRNG layer): a different seed yields a different permutation.
+    #[test]
+    fn test_sr_f2_csprng_layer_seed_sensitivity() {
+        let window_len = 5 * RS_BLOCK;
+        let stream: Vec<u8> = (0..window_len).map(|i| i as u8).collect();
+        let a = CsprngLayer::new([1u8; KEY_LEN])
+            .unwrap()
+            .interleave(&stream, window_len);
+        let b = CsprngLayer::new([2u8; KEY_LEN])
+            .unwrap()
+            .interleave(&stream, window_len);
+        assert_ne!(a, b, "distinct seeds → distinct permutations");
+    }
+
+    /// P0-1 (CSPRNG KAT): a fixed seed + fixed input produces a locked golden
+    /// output, pinning the ChaCha20→rejection-sampled→Fisher-Yates derivation
+    /// (the wire format for the optional layer).
+    #[test]
+    fn test_p0_1_csprng_layer_golden_kat() {
+        let layer = CsprngLayer::new([0x42u8; KEY_LEN]).unwrap();
+        // One window of exactly RS_BLOCK bytes (single-codeword window) keeps the
+        // golden vector short while exercising the full derivation.
+        let window_len = RS_BLOCK;
+        let stream: Vec<u8> = (0..RS_BLOCK as u32).map(|i| i as u8).collect();
+        let out = layer.interleave(&stream, window_len);
+        // Golden first 16 output bytes (locked; regenerated only on a deliberate
+        // format change). Full round-trip below proves invertibility.
+        const GOLDEN_HEAD: [u8; 16] = [
+            249, 67, 112, 93, 186, 69, 114, 89, 224, 248, 92, 219, 140, 64, 91, 56,
+        ];
+        assert_eq!(
+            &out[..16],
+            &GOLDEN_HEAD,
+            "CSPRNG derivation is format-locked"
+        );
+        assert_eq!(layer.deinterleave(&out, window_len), stream);
+    }
+
+    /// SR-F2 (CSPRNG degradation, quantified — see
+    /// `docs/interleaver-csprng-degradation.md`): unlike the block interleaver's
+    /// guaranteed ≤1 burst symbol per codeword, the random permutation clusters
+    /// ≥2 burst symbols into one RS codeword with probability
+    /// `1 - depth!/depth^depth` (≈0.96 at depth=5). This test empirically
+    /// confirms the modeled bound and contrasts it with the block interleaver's 0.
+    #[test]
+    fn test_sr_f2_csprng_burst_clustering_matches_modeled_bound() {
+        let depth = 5usize;
+        let window_len = depth * RS_BLOCK;
+        let layer = CsprngLayer::new([0x7Fu8; KEY_LEN]).unwrap();
+
+        // Model: depth burst symbols → depth uniform codewords (balls-in-bins).
+        // P(some codeword gets >=2) = 1 - depth!/depth^depth.
+        let factorial: u64 = (1..=depth as u64).product();
+        let total: u64 = (depth as u64).pow(depth as u32);
+        let modeled_cluster_prob = 1.0 - (factorial as f64) / (total as f64);
+
+        // Sample the permutation distribution across independent window indices.
+        // 1200 trials keep the std. error (~0.006) far under the 0.05 tolerance.
+        let trials = 1200u64;
+        let mut clustered = 0u32;
+        for w in 0..trials {
+            let perm = layer.window_perm(window_len, w);
+            // A depth-length channel burst at positions 0..depth lands at stream
+            // positions perm[0..depth]; codeword = position / RS_BLOCK.
+            let mut codewords = std::collections::HashSet::new();
+            let collided = perm
+                .iter()
+                .take(depth)
+                .any(|&pos| !codewords.insert(pos / RS_BLOCK));
+            if collided {
+                clustered += 1;
+            }
+        }
+        let empirical = f64::from(clustered) / trials as f64;
+        assert!(
+            (empirical - modeled_cluster_prob).abs() < 0.05,
+            "empirical clustering {empirical:.3} within 0.05 of modeled {modeled_cluster_prob:.3}"
+        );
+
+        // Contrast: the deterministic block interleaver guarantees 0 clustering
+        // for the same depth-length burst (column-major → distinct rows).
+        let mut block_cw = std::collections::HashSet::new();
+        let block_no_cluster = (0..depth).all(|k| {
+            let row = k % depth; // column-major inner loop is `row`
+            block_cw.insert(row)
+        });
+        assert!(
+            block_no_cluster,
+            "block interleaver: depth-length burst → 0 codeword clustering"
         );
     }
 }

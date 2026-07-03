@@ -15,7 +15,7 @@
 pub mod interleaver;
 pub mod rs;
 
-pub use interleaver::BlockInterleaver;
+pub use interleaver::{BlockInterleaver, CsprngLayer, Interleaver};
 pub use rs::ReedSolomonCodec;
 
 use crate::error::Result;
