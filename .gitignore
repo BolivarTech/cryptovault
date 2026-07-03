@@ -3,6 +3,13 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
+# cargo-fuzz build + runtime artifacts (the targets + fuzz/Cargo.toml are tracked;
+# the compiled corpus, coverage, crash artifacts, and build tree are not).
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+
 # SBTDD + agent local artifacts (local to each developer, never tracked)
 CLAUDE.local.md
 CLAUDE.md
@@ -13,6 +20,8 @@ planning/
 # Dev-only tooling, not part of the publishable crate. Canonical copy lives in
 # ~/BolivarTech/AI_Tools/ for reuse across repos.
 /scripts/graphify_ollama.py
+/scripts/claude_usage.py
+claude-usage*.txt
 
 # Python bytecode/caches from dev scripts
 __pycache__/
@@ -24,3 +33,7 @@ graphify-out/cost.json
 graphify-out/cache/
 graphify-out/.graphify_python
 graphify-out/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+
+# Machine-local git-attributes: union-merge for graph.json (graphify howto §6),
+# paired with the per-machine, non-versioned graphify git hooks (§9).
+.gitattributes
