@@ -657,6 +657,32 @@ mod construction_tests {
         ));
     }
 
+    /// C1 / SR-F4: a vault injected with the AEAD-only [`NoFec`] stack round-trips
+    /// its own output through the **public API**. `NoFec` emits a raw (non-FEC)
+    /// blob, so the decrypt path's structural validation must be delegated to the
+    /// injected strategy — a hard-coded concatenated-FEC gate rejects a `NoFec`
+    /// blob and breaks this documented injectable configuration.
+    #[test]
+    fn test_c1_nofec_vault_roundtrips_via_public_api() {
+        let vault = CryptoVault::new(
+            Box::new(Argon2Kdf),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(NoFec),
+        );
+        let master = [0x5Au8; KEY_LEN];
+
+        // UTF-8 string front door round-trips through a NoFec vault.
+        let blob = vault.encrypt_with_key(&master, "small message").unwrap();
+        let recovered = vault.decrypt_with_key(&master, &blob).unwrap();
+        assert_eq!(&**recovered, "small message", "NoFec string round-trip");
+
+        // Raw-byte envelope front door round-trips through a NoFec vault.
+        let dek: Vec<u8> = (0..64u8).collect();
+        let wrapped = vault.wrap_key(&master, &dek).unwrap();
+        let unwrapped = vault.unwrap_key(&master, &wrapped).unwrap();
+        assert_eq!(&*unwrapped, &dek, "NoFec raw-byte round-trip");
+    }
+
     /// The AEAD-only fallback codec [`NoFec`] is an identity
     /// [`ErrorCorrection`]: `encode` returns the input unchanged and `decode`
     /// truncates the received bytes to `pre_len` — security preserved, channel
