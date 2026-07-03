@@ -229,6 +229,17 @@ impl CryptoVault {
     /// encrypt / decrypt / envelope operations; Argon2id runs only here, never
     /// per record.
     ///
+    /// # ⚠️ Resource-exhaustion / DoS surface (SR-C2)
+    ///
+    /// This call runs **memory-hard Argon2id** at the OWASP-2025 profile —
+    /// **64 MiB of RAM plus CPU per call** — and is intended to run **once per
+    /// session**. It is a resource-exhaustion / DoS surface: a service that
+    /// exposes `derive_key` to untrusted callers **MUST rate-limit it** (each
+    /// call costs 64 MiB + CPU, so unbounded invocation can exhaust memory/CPU).
+    /// The per-record `encrypt_*` / `decrypt_*` / envelope paths use the cached
+    /// master and do **not** re-run Argon2, so only this entry point carries the
+    /// memory-hard cost.
+    ///
     /// # Parameters
     /// - `password`: the passphrase (must be non-empty).
     /// - `salt`: the per-context salt (must be exactly [`crate::SALT_LEN`] bytes;

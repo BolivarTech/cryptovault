@@ -73,6 +73,16 @@
 //! use a **distinct salt per context**: reusing a salt yields the same master key
 //! across contexts (a key collision). The stateless crate cannot detect reuse.
 //!
+//! ### `derive_key` is memory-hard — rate-limit untrusted callers
+//!
+//! [`vault::CryptoVault::derive_key`] runs **memory-hard Argon2id (64 MiB of RAM
+//! plus CPU, per call)** and is intended to run **once per session** (SR-C2). It
+//! is therefore a resource-exhaustion / DoS surface: a service exposing
+//! `derive_key` to untrusted callers **MUST rate-limit it**, since each call
+//! costs 64 MiB + CPU and unbounded invocation can exhaust memory/CPU. The
+//! per-record encrypt/decrypt and envelope paths use the **cached** master and do
+//! **not** re-run Argon2, so only `derive_key` carries the memory-hard cost.
+//!
 //! ### DC-1 — active-adversary FEC-availability limitation (optional layer only)
 //!
 //! The **default** deterministic block interleaver is public and keyless — no
