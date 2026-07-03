@@ -18,7 +18,8 @@ use crate::error::{CryptoError, Result};
 use crate::fec::{ConcatenatedFec, ErrorCorrection};
 use crate::kdf::{expand_aead_key, Argon2Kdf, KeyDerivation};
 use crate::{
-    BLOB_VERSION, HEADER_LEN, KEY_LEN, MAX_B64_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, SALT_LEN,
+    BLOB_VERSION, HEADER_LEN, KEY_LEN, MAX_B64_LEN, MAX_BLOB_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN,
+    SALT_LEN,
 };
 
 /// Generates a fresh per-context Argon2 salt: [`crate::SALT_LEN`] random bytes
@@ -133,6 +134,23 @@ impl ErrorCorrection for NoFec {
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
         let end = pre_len.min(encoded.len());
         Ok(encoded[..end].to_vec())
+    }
+
+    /// Caps `received.len() <= `[`MAX_BLOB_LEN`] and returns it unchanged
+    /// (SR-R4).
+    ///
+    /// A `NoFec` blob is the raw protected payload — there is **no** FEC framing
+    /// to validate, so the whole received buffer is the pre-decode length. The
+    /// allocation cap still applies so a hostile oversized blob is rejected
+    /// before decode; never panics on adversarial input.
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+        if received.len() > MAX_BLOB_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
+                received.len()
+            )));
+        }
+        Ok(received.len())
     }
 }
 

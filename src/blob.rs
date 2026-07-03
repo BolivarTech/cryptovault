@@ -8,8 +8,7 @@ use crate::error::{CryptoError, Result};
 use crate::fec::viterbi::rs_len_from_body;
 use crate::fec::ErrorCorrection;
 use crate::{
-    BLOB_VERSION, HEADER_LEN, MAX_BLOB_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, RS_BLOCK, RS_DATA,
-    TAG_LEN,
+    BLOB_VERSION, HEADER_LEN, MAX_BLOB_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, RS_BLOCK, TAG_LEN,
 };
 
 /// FEC-encodes a blob: `Viterbi(interleave(RS(version ‖ plaintext_len ‖ body)))`
@@ -68,16 +67,18 @@ pub fn encode_blob(
 /// rather than fatal, and the recovered header is what the caller binds as AAD.
 ///
 /// Steps:
-/// 1. [`validate_pre_fec`] derives the RS-stream length `L` and rejects an
+/// 1. [`ErrorCorrection::validate_pre_fec`] — the **strategy-owned** structural
+///    gate — derives the pre-decode payload length and rejects an
 ///    oversized/malformed blob before any large allocation (SR-R3a / SR-R4).
-/// 2. `recovered_len = (L / RS_BLOCK) · RS_DATA` — the recovered payload length,
-///    derived from the framed length **without** the still-encoded header (SR-R2,
-///    no bootstrapping).
-/// 3. `fec.decode(received, recovered_len)` recovers the protected payload.
-/// 4. Read the error-corrected header at offset 0; validate
+///    Delegating to the injected strategy keeps this function format-agnostic:
+///    the concatenated FEC derives the length from its chunked-Viterbi framing,
+///    while [`crate::vault::NoFec`] returns the raw blob length (SR-R2, no
+///    bootstrapping — the length comes from the framed blob, not the header).
+/// 2. `fec.decode(received, recovered_len)` recovers the protected payload.
+/// 3. Read the error-corrected header at offset 0; validate
 ///    `version == BLOB_VERSION`, `plaintext_len ≤ MAX_PLAINTEXT_LEN`, and the
 ///    derived `protected_len ≤ recovered_len` (header offsets in bounds).
-/// 5. Return `(version, plaintext_len, body)` where `body = protected[HEADER_LEN
+/// 4. Return `(version, plaintext_len, body)` where `body = protected[HEADER_LEN
 ///    .. protected_len]` (`nonce ‖ ciphertext ‖ tag`).
 ///
 /// # Parameters
@@ -95,17 +96,17 @@ pub fn encode_blob(
 /// exceeds the FEC capacity. **Never panics** on adversarial input (SC-6 /
 /// SR-R5).
 pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u32, Vec<u8>)> {
-    // (1) SR-R3a / SR-R4: structural gate → derived RS-stream length L.
-    let l = validate_pre_fec(received)?;
-    // (2) SR-R2: recovered payload length from the framed length alone — L is a
-    // whole number of RS_BLOCK codewords (guaranteed by validate_pre_fec), each
-    // carrying RS_DATA data bytes.
-    let recovered_len = (l / RS_BLOCK) * RS_DATA;
-    // (3) FEC-correct the whole payload (truncation to recovered_len is a no-op:
-    // RS decode already yields exactly this many data bytes).
+    // (1) SR-R3a / SR-R4: strategy-owned structural gate → pre-decode payload
+    // length. The concatenated FEC derives it from the chunked-Viterbi framing;
+    // NoFec returns the raw blob length. Delegating keeps decode_blob
+    // format-agnostic so an injected strategy can decode its own output.
+    let recovered_len = fec.validate_pre_fec(received)?;
+    // (2) FEC-correct the whole payload, truncated to the recovered length (a
+    // no-op for the RS path, which already yields exactly this many data bytes).
     let protected = fec.decode(received, recovered_len)?;
-    // (4) Read the error-corrected header @0. `recovered_len >= RS_DATA (223)`
-    // by construction, but guard defensively so a codec length bug cannot panic.
+    // (3) Read the error-corrected header @0. `recovered_len >= RS_DATA (223)`
+    // by construction for the RS path, but guard defensively so a codec length
+    // bug cannot panic.
     if protected.len() < HEADER_LEN {
         return Err(CryptoError::InvalidInput(format!(
             "recovered payload {} shorter than the {HEADER_LEN}-byte header",
@@ -139,7 +140,7 @@ pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u3
             protected.len()
         )));
     }
-    // (5) Slice out body = nonce ‖ ciphertext ‖ tag (padding beyond protected_len
+    // (4) Slice out body = nonce ‖ ciphertext ‖ tag (padding beyond protected_len
     // is discarded).
     let body = protected[HEADER_LEN..protected_len].to_vec();
     Ok((version, plaintext_len, body))

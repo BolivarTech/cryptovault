@@ -8,7 +8,7 @@ use reedsolomon::{ReedSolomon, RsError};
 
 use crate::error::{CryptoError, Result};
 use crate::fec::ErrorCorrection;
-use crate::RS_BLOCK;
+use crate::{MAX_BLOB_LEN, RS_BLOCK, RS_DATA};
 
 /// Reed-Solomon `RS(255, 223)` outer code (SR-F1).
 ///
@@ -61,6 +61,30 @@ impl ErrorCorrection for ReedSolomonCodec {
                 RsError::Uncorrectable(m) => CryptoError::ErrorCorrection(m),
                 RsError::InvalidInput(m) => CryptoError::InvalidInput(m),
             })
+    }
+
+    /// Validates the RS-only framing and returns the recovered data length
+    /// (SR-R3a / SR-R4).
+    ///
+    /// An RS blob (this codec used standalone, without the inner Viterbi/
+    /// interleaver) is a whole number of [`RS_BLOCK`]-byte codewords: caps
+    /// `received.len() <= `[`MAX_BLOB_LEN`], requires at least one codeword and a
+    /// whole-codeword length, and returns the recovered data length
+    /// `(blocks · RS_DATA)`. Never panics on adversarial input.
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+        if received.len() > MAX_BLOB_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
+                received.len()
+            )));
+        }
+        match block_count(received.len()) {
+            Some(blocks) if blocks >= 1 => Ok(blocks * RS_DATA),
+            _ => Err(CryptoError::InvalidInput(format!(
+                "RS stream length {} is not a positive multiple of RS_BLOCK ({RS_BLOCK})",
+                received.len()
+            ))),
+        }
     }
 }
 

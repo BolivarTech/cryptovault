@@ -22,6 +22,7 @@ pub use viterbi::ViterbiCodec;
 
 use crate::blob::validate_pre_fec;
 use crate::error::{CryptoError, Result};
+use crate::{RS_BLOCK, RS_DATA};
 
 /// Default interleave depth `I` (codewords per window) — CCSDS baseline (SR-F2).
 const DEFAULT_INTERLEAVE_DEPTH: usize = 5;
@@ -67,6 +68,31 @@ pub trait ErrorCorrection: Send + Sync {
     /// - [`crate::error::CryptoError::ErrorCorrection`] if corruption exceeds the
     ///   code's correction capacity.
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>>;
+
+    /// Validates a received blob's framing **before** any FEC decode and returns
+    /// the pre-decode payload length to recover (SR-R3a / SR-R4).
+    ///
+    /// This is the **strategy-owned** structural gate on the decrypt path: each
+    /// codec knows its own wire framing, so the blob layer
+    /// ([`crate::blob::decode_blob`]) delegates here instead of hard-coding the
+    /// concatenated-FEC chunk math — that math would reject a blob produced by a
+    /// different strategy (e.g. the identity [`crate::vault::NoFec`], whose blob
+    /// is a raw protected payload with no FEC structure). The gate caps
+    /// `received.len() <= `[`crate::MAX_BLOB_LEN`] to bound allocation and
+    /// **never panics** on adversarial input.
+    ///
+    /// # Parameters
+    /// - `received`: the raw received blob (post-base64-decode).
+    ///
+    /// # Returns
+    /// The pre-decode length to pass as `pre_len` to [`decode`](Self::decode):
+    /// for the Reed-Solomon-based codecs the recovered RS data length, for
+    /// [`crate::vault::NoFec`] the received length itself.
+    ///
+    /// # Errors
+    /// [`crate::error::CryptoError::InvalidInput`] if `received` is oversized
+    /// (`> `[`crate::MAX_BLOB_LEN`]) or structurally malformed for this codec.
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize>;
 }
 
 /// The concatenated forward-error-correction stack (SR-F4).
@@ -179,6 +205,21 @@ impl ErrorCorrection for ConcatenatedFec {
         }
         // (4) Undo the interleaver, then the outer Reed-Solomon code.
         self.rs.decode(&self.il.deinterleave(&rs_stream), pre_len)
+    }
+
+    /// Validates the chunked-Viterbi framing and returns the recovered RS data
+    /// length (SR-R3a / SR-R4).
+    ///
+    /// Delegates to the free [`validate_pre_fec`] (the single authoritative
+    /// chunked-Viterbi structural check, shared with [`decode`](Self::decode)'s
+    /// SR-R3b cross-check), then maps the derived RS-stream length `l` to the
+    /// pre-decode data length `(l / RS_BLOCK) · RS_DATA` — the exact `pre_len`
+    /// [`decode`](Self::decode) truncates to.
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+        let l = validate_pre_fec(received)?;
+        // `l` is a positive whole multiple of RS_BLOCK (guaranteed above), each
+        // codeword carrying RS_DATA data bytes.
+        Ok((l / RS_BLOCK) * RS_DATA)
     }
 }
 
