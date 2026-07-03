@@ -4,6 +4,118 @@
 //! Blob format: wire encoding/decoding and structural validation performed
 //! before any large allocation (implemented in Tasks 10-14, SR-R1/R3/R4/R6).
 
+use crate::error::Result;
+
+/// Structural pre-FEC validation gate (SR-R3a / SR-R4 / P0-6) — Red-phase stub.
+///
+/// Implemented in the Green phase; this stub exists only so the failing tests
+/// compile and fail by assertion (no structural validation yet).
+pub fn validate_pre_fec(_received: &[u8]) -> Result<usize> {
+    Ok(0)
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::validate_pre_fec;
+    use crate::error::CryptoError;
+    use crate::fec::viterbi::ViterbiCodec;
+    use crate::{MAX_BLOB_LEN, RS_BLOCK};
+
+    /// SR-R3a: a structurally valid FEC body (the Viterbi encoding of a whole
+    /// number of RS codewords) validates and returns the exact derived RS-stream
+    /// length `L`.
+    #[test]
+    fn test_sr_r3_valid_body_returns_derived_rs_stream_length() {
+        let vt = ViterbiCodec;
+        for codewords in [1usize, 2, 5] {
+            let l = codewords * RS_BLOCK;
+            let body = vt.encode(&vec![0u8; l]);
+            assert_eq!(
+                validate_pre_fec(&body).unwrap(),
+                l,
+                "derived L matches the encoded RS-stream length ({codewords} codewords)"
+            );
+        }
+    }
+
+    /// SR-R4: a body longer than `MAX_BLOB_LEN` is rejected before any FEC
+    /// allocation.
+    #[test]
+    fn test_sr_r4_oversized_body_is_invalid_input() {
+        let oversized = vec![0u8; MAX_BLOB_LEN + 1];
+        assert!(matches!(
+            validate_pre_fec(&oversized),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// SR-R3a: a body whose derived RS-stream length is not a whole multiple of
+    /// `RS_BLOCK` (here `L = 100`, structurally consistent as a Viterbi body but
+    /// not a valid RS stream) is rejected.
+    #[test]
+    fn test_sr_r3_non_rs_block_multiple_is_invalid_input() {
+        // 100 info bytes → coded body 2·100 + 2 = 202 bytes; 100 is not a
+        // multiple of RS_BLOCK.
+        let body = vec![0u8; 202];
+        assert!(matches!(
+            validate_pre_fec(&body),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// SR-R3a: a body length inconsistent with the per-chunk coded formula (odd,
+    /// so it cannot be `2·il + 2`) is rejected, never a panic.
+    #[test]
+    fn test_sr_r3_odd_body_length_is_invalid_input() {
+        let body = vec![0u8; 205]; // odd → not a valid coded body
+        assert!(matches!(
+            validate_pre_fec(&body),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// SR-R3a: bodies too short to hold even one codeword — empty and below the
+    /// minimum chunk body — are rejected.
+    #[test]
+    fn test_sr_r3_too_short_body_is_invalid_input() {
+        assert!(matches!(
+            validate_pre_fec(&[]),
+            Err(CryptoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_pre_fec(&[0u8; 2]),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// SC-6 / SR-R5: `validate_pre_fec` never panics on arbitrary bytes — every
+    /// input yields either a derived length or a typed `InvalidInput`.
+    #[test]
+    fn test_sc6_validate_pre_fec_never_panics_on_junk() {
+        for len in [1usize, 3, 4, 254, 256, 511, 513, 1021, 1023] {
+            let junk: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+            // Must not panic; result is either Ok(L) or a typed error.
+            let _ = validate_pre_fec(&junk);
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::validate_pre_fec;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// SC-6 / SR-R5: over thousands of arbitrary byte strings,
+        /// `validate_pre_fec` never panics — the decrypt-path structural guard is
+        /// total.
+        #[test]
+        fn prop_sr_r5_validate_pre_fec_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = validate_pre_fec(&bytes);
+        }
+    }
+}
+
 #[cfg(test)]
 mod boundary_tests {
     use crate::fec::rs::ReedSolomonCodec;

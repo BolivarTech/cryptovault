@@ -27,3 +27,4 @@ reedsolomon = "0.1"
 viterbi = "0.0.1"
 
 [dev-dependencies]
+proptest = "1"          # property-based no-panic / round-trip coverage (SR-R5).
