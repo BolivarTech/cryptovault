@@ -7,6 +7,9 @@
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use rand::rngs::OsRng;
+use rand::RngCore;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::blob::{decode_blob, encode_blob};
@@ -14,7 +17,83 @@ use crate::cipher::{sample_nonce, Aes256GcmSivCipher, AuthenticatedCipher};
 use crate::error::{CryptoError, Result};
 use crate::fec::{ConcatenatedFec, ErrorCorrection};
 use crate::kdf::{expand_aead_key, Argon2Kdf, KeyDerivation};
-use crate::{BLOB_VERSION, HEADER_LEN, MAX_B64_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, SALT_LEN};
+use crate::{
+    BLOB_VERSION, HEADER_LEN, KEY_LEN, MAX_B64_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, SALT_LEN,
+};
+
+/// Generates a fresh per-context Argon2 salt: [`crate::SALT_LEN`] random bytes
+/// from the operating-system CSPRNG (`OsRng`), in a [`Zeroizing`] buffer
+/// (SR-C6).
+///
+/// Callers SHALL obtain every salt from this helper (never hand-rolled) so each
+/// context gets a unique, high-entropy salt; salt uniqueness across contexts is
+/// the caller's contract (reuse → same master → key collision).
+///
+/// # Returns
+/// A [`Zeroizing`]-wrapped [`crate::SALT_LEN`]-byte salt (wiped on drop).
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] if `OsRng` fails to produce entropy — the salt
+/// is **never** returned zero/weak and the function never panics (SR-C6 mirrors
+/// the SR-C1 nonce contract).
+pub fn generate_salt() -> Result<Zeroizing<Vec<u8>>> {
+    random_zeroizing(SALT_LEN)
+}
+
+/// Generates a fresh data-encryption key (DEK): [`crate::KEY_LEN`] random bytes
+/// from `OsRng`, in a [`Zeroizing`] buffer (SR-C6).
+///
+/// A one-way generator (no inverse) for the envelope DEK/KEK scheme; wrap the
+/// returned DEK with [`CryptoVault::wrap_key`].
+///
+/// # Returns
+/// A [`Zeroizing`]-wrapped [`crate::KEY_LEN`]-byte key (wiped on drop).
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] if `OsRng` fails to produce entropy — the key
+/// is **never** returned zero/weak and the function never panics.
+pub fn generate_dek() -> Result<Zeroizing<Vec<u8>>> {
+    random_zeroizing(KEY_LEN)
+}
+
+/// Fills a [`Zeroizing`] buffer of `len` bytes from `OsRng` (DRY: shared by the
+/// salt/DEK generators).
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] on an `OsRng` entropy failure — surfaced as a
+/// typed error, never a panic and never a partially/zero-filled buffer.
+fn random_zeroizing(len: usize) -> Result<Zeroizing<Vec<u8>>> {
+    let mut buf = Zeroizing::new(vec![0u8; len]);
+    OsRng
+        .try_fill_bytes(&mut buf)
+        .map_err(|e| CryptoError::KeyDerivation(format!("OsRng entropy failure: {e}")))?;
+    Ok(buf)
+}
+
+/// Compares two byte slices for equality in **constant time** with respect to
+/// their content (SR-C7), for secret/tag comparisons where a data-dependent
+/// early-exit would leak timing information.
+///
+/// Backed by [`subtle::ConstantTimeEq`]: slices of differing length compare
+/// unequal, and equal-length slices are compared without a content-dependent
+/// branch.
+///
+/// # Parameters
+/// - `a` / `b`: the byte slices to compare (e.g. an expected vs. computed tag).
+///
+/// # Returns
+/// `true` iff `a` and `b` have the same length and identical bytes.
+///
+/// # Examples
+/// ```
+/// use cryptovault::vault::constant_time_eq;
+/// assert!(constant_time_eq(b"tag", b"tag"));
+/// assert!(!constant_time_eq(b"tag", b"tab"));
+/// ```
+#[must_use]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.ct_eq(b).into()
+}
 
 /// Identity [`ErrorCorrection`] — the AEAD-only degraded-but-secure fallback.
 ///
@@ -584,6 +663,45 @@ mod construction_tests {
         );
         // pre_len beyond the input length is clamped — never a slice panic.
         assert_eq!(NoFec.decode(&data, 999).unwrap(), data, "pre_len clamped");
+    }
+}
+
+#[cfg(test)]
+mod generator_tests {
+    use super::{constant_time_eq, generate_dek, generate_salt};
+    use crate::{KEY_LEN, SALT_LEN};
+
+    /// SR-C6: `generate_salt` returns exactly [`SALT_LEN`] bytes and yields a
+    /// distinct value on each call (fresh `OsRng` entropy).
+    #[test]
+    fn test_sr_c6_generate_salt_correct_len_and_unique() {
+        let a = generate_salt().unwrap();
+        let b = generate_salt().unwrap();
+        assert_eq!(a.len(), SALT_LEN, "salt is SALT_LEN bytes");
+        assert_ne!(&*a, &*b, "two salts must differ (unique per call)");
+    }
+
+    /// SR-C6: `generate_dek` returns exactly [`KEY_LEN`] bytes and yields a
+    /// distinct value on each call.
+    #[test]
+    fn test_sr_c6_generate_dek_correct_len_and_unique() {
+        let a = generate_dek().unwrap();
+        let b = generate_dek().unwrap();
+        assert_eq!(a.len(), KEY_LEN, "dek is KEY_LEN bytes");
+        assert_ne!(&*a, &*b, "two deks must differ (unique per call)");
+    }
+
+    /// SR-C7: the constant-time comparison agrees with logical equality —
+    /// `true` for identical slices, `false` for differing content or length.
+    #[test]
+    fn test_sr_c7_constant_time_eq_matches_equality() {
+        assert!(constant_time_eq(b"same tag", b"same tag"), "equal slices");
+        assert!(!constant_time_eq(b"tag a", b"tag b"), "differing content");
+        assert!(
+            !constant_time_eq(b"short", b"longer tag"),
+            "differing length"
+        );
+        assert!(constant_time_eq(b"", b""), "empty slices are equal");
     }
 }
 
