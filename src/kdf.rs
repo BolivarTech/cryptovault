@@ -28,7 +28,7 @@ const HKDF_INFO_INTERLEAVER: &[u8] = b"cryptovault:v1:interleaver";
 ///
 /// Injectable so the audited [`Argon2Kdf`] default can be swapped for a test
 /// double (e.g. a deterministic stub). Implementors MUST be `Send + Sync` so a
-/// [`crate::vault::CryptoVault`] can derive across threads.
+/// `CryptoVault` can derive across threads.
 pub trait KeyDerivation: Send + Sync {
     /// Derive the 32-byte master secret from `password` and `salt`.
     ///
