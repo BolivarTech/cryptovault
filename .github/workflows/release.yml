@@ -1,0 +1,76 @@
+# Release pipeline for cryptovault — runs only on `v*` tags.
+#
+# Three gated stages, in order:
+#   1. ci              — the §0.1 quality gates (fmt / clippy / nextest / doc / audit).
+#   2. fec-review-gate — the SR-F5 external-FEC-review gate: no release tag may be
+#                        cut without a signed in-repo review of the FEC crates.
+#   3. publish         — needs BOTH ci and fec-review-gate green; verifies the tag
+#                        matches the crate version, then `cargo publish`.
+#
+# Publish CANNOT run unless CI is green AND the signed FEC review exists.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: ci gates
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-audit
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-features --tests -- -D warnings
+      - name: cargo nextest run
+        run: cargo nextest run --all-features
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps --all-features
+      - name: cargo audit
+        run: cargo audit
+
+  fec-review-gate:
+    name: SR-F5 external FEC review gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Enforce signed external FEC review
+        run: cargo run --manifest-path xtask/Cargo.toml -- review-gate
+
+  publish:
+    name: publish to crates.io
+    needs: [ci, fec-review-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "Tag version:        $TAG_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
