@@ -126,7 +126,7 @@ impl ConcatenatedFec {
 
 impl Default for ConcatenatedFec {
     /// Wires the audited default stack: RS(255,223), a depth-5 deterministic
-    /// block interleaver ([`DEFAULT_INTERLEAVE_DEPTH`]), and the CCSDS Viterbi
+    /// block interleaver (`DEFAULT_INTERLEAVE_DEPTH`), and the CCSDS Viterbi
     /// codec.
     fn default() -> Self {
         Self::new(
@@ -153,7 +153,7 @@ impl ErrorCorrection for ConcatenatedFec {
     /// original `data` truncated to `pre_len` (SR-F4).
     ///
     /// Stages, in order: **(1)** structural pre-FEC validation
-    /// ([`validate_pre_fec`](crate::blob::validate_pre_fec), SR-R3a) derives the
+    /// ([`validate_pre_fec`], SR-R3a) derives the
     /// expected RS-stream length `l` and rejects a malformed/oversized blob before
     /// any large allocation; **(2)** Viterbi decode; **(3)** a post-Viterbi
     /// length cross-check (`rs_stream.len() == l`, SR-R3b) that catches a
