@@ -851,6 +851,37 @@ mod envelope_tests {
         ));
     }
 
+    /// C2 / SR-C5: the **public** envelope API composes end-to-end —
+    /// `wrap_key(kek, salt, dek)` binds the per-context salt as AAD, so
+    /// `wrap → rewrap → unwrap_key` chains through the public surface: the new
+    /// context recovers the exact DEK and the old context no longer unwraps the
+    /// rewrapped blob.
+    #[test]
+    fn test_c2_public_wrap_rewrap_unwrap_chain() {
+        let v = CryptoVault::default();
+        let (old_kek, new_kek) = ([1u8; KEY_LEN], [9u8; KEY_LEN]);
+        let (old_salt, new_salt) = ([2u8; SALT_LEN], [3u8; SALT_LEN]);
+        let dek: Vec<u8> = (0..64u8).collect();
+
+        // Public wrap binds (old_kek, old_salt).
+        let wrapped = v.wrap_key(&old_kek, &old_salt, &dek).unwrap();
+        // Rotate to the new context.
+        let rewrapped = v
+            .rewrap(&old_kek, &old_salt, &new_kek, &new_salt, &wrapped)
+            .unwrap();
+        // The NEW context recovers the exact DEK through the public unwrap.
+        let recovered = v.unwrap_key(&new_kek, &new_salt, &rewrapped).unwrap();
+        assert_eq!(&*recovered, &dek, "public wrap→rewrap→unwrap recovers the DEK");
+        // The OLD context no longer unwraps the rewrapped blob.
+        assert!(
+            matches!(
+                v.unwrap_key(&old_kek, &old_salt, &rewrapped),
+                Err(CryptoError::Cipher(_))
+            ),
+            "old context must not unwrap the rewrapped blob"
+        );
+    }
+
     /// SC-7 / SR-C5: `rewrap` re-binds a salt-bound DEK from the old context to a
     /// new `(kek, salt)`; the new context unwraps it, the old context no longer
     /// does (its salt AAD no longer matches).
