@@ -4,14 +4,70 @@
 //! Blob format: wire encoding/decoding and structural validation performed
 //! before any large allocation (implemented in Tasks 10-14, SR-R1/R3/R4/R6).
 
-use crate::error::Result;
+use crate::error::{CryptoError, Result};
+use crate::fec::viterbi::rs_len_from_body;
+use crate::{MAX_BLOB_LEN, RS_BLOCK};
 
-/// Structural pre-FEC validation gate (SR-R3a / SR-R4 / P0-6) — Red-phase stub.
+/// Validates a received FEC body's framing **before** any FEC decode and returns
+/// the derived Reed-Solomon stream length `L` (SR-R3a / SR-R4 / P0-6).
 ///
-/// Implemented in the Green phase; this stub exists only so the failing tests
-/// compile and fail by assertion (no structural validation yet).
-pub fn validate_pre_fec(_received: &[u8]) -> Result<usize> {
-    Ok(0)
+/// This is the first, cheap, allocation-free gate on the decrypt path: it never
+/// touches the FEC codecs, so a hostile or malformed blob is rejected before it
+/// can drive a large allocation or reach the early-stage FEC crates. The checks,
+/// in order:
+///
+/// 1. **DoS cap (SR-R4):** `received.len() ≤ `[`MAX_BLOB_LEN`].
+/// 2. **Chunked-Viterbi consistency (SR-R3a):** `received.len()` inverts through
+///    the *same* chunk math the decoder uses ([`rs_len_from_body`] — the single
+///    source of truth), so TX and RX agree byte-for-byte; a body inconsistent
+///    with the per-chunk coded formula is rejected here.
+/// 3. **RS framing (SR-R3a):** the derived `L` is a **positive whole multiple**
+///    of [`RS_BLOCK`] (at least one codeword).
+///
+/// # Parameters
+/// - `received`: the raw received FEC body (the Viterbi-encoded stream, before
+///   base64 is stripped at the blob layer).
+///
+/// # Returns
+/// The derived RS-stream length `L` in bytes, to be cross-checked against the
+/// actual post-Viterbi length (SR-R3b, in the FEC decode).
+///
+/// # Errors
+/// [`CryptoError::InvalidInput`] on any violation above. **Never panics** on
+/// adversarial input (SC-6 / SR-R5).
+///
+/// # Examples
+///
+/// ```
+/// use cryptovault::blob::validate_pre_fec;
+/// use cryptovault::fec::ViterbiCodec;
+/// use cryptovault::RS_BLOCK;
+///
+/// // A Viterbi body encoding one RS codeword validates to L = RS_BLOCK.
+/// let body = ViterbiCodec.encode(&vec![0u8; RS_BLOCK]);
+/// assert_eq!(validate_pre_fec(&body).unwrap(), RS_BLOCK);
+///
+/// // Junk is rejected, never a panic.
+/// assert!(validate_pre_fec(&[0u8; 3]).is_err());
+/// ```
+pub fn validate_pre_fec(received: &[u8]) -> Result<usize> {
+    // (1) SR-R4: reject an over-cap blob before any FEC allocation.
+    if received.len() > MAX_BLOB_LEN {
+        return Err(CryptoError::InvalidInput(format!(
+            "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
+            received.len()
+        )));
+    }
+    // (2) SR-R3a: derive L via the shared chunked-Viterbi math (validates the
+    // per-chunk coded structure: even, minimum-size final sub-block).
+    let l = rs_len_from_body(received.len())?;
+    // (3) SR-R3a: the RS stream must be a positive whole number of codewords.
+    if l == 0 || l % RS_BLOCK != 0 {
+        return Err(CryptoError::InvalidInput(format!(
+            "derived RS-stream length {l} is not a positive multiple of RS_BLOCK ({RS_BLOCK})"
+        )));
+    }
+    Ok(l)
 }
 
 #[cfg(test)]

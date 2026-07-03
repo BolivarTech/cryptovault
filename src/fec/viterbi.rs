@@ -160,6 +160,35 @@ fn chunk_body_lengths(total: usize) -> Result<Vec<usize>> {
     Ok(bodies)
 }
 
+/// Derives the Reed-Solomon stream length `L` (bytes) that a `body_len`-byte
+/// chunked-Viterbi body decodes to, validating the per-chunk structure
+/// (SR-R3a / SR-F3).
+///
+/// This is the **single source of truth** for inverting [`ViterbiCodec::encode`]'s
+/// chunking: it reuses [`chunk_body_lengths`] (the one place the chunk math
+/// lives), so every caller — [`ViterbiCodec::decode`] via `chunk_body_lengths`
+/// and the blob layer's `validate_pre_fec` via this function — derives the
+/// identical `L`, byte-for-byte. Each sub-block of `b` coded bytes carries
+/// `b / 2 - 1` info bytes (from `b = 2·il + 2`), so `L` is their sum. An empty
+/// body yields `L = 0`.
+///
+/// # Parameters
+/// - `body_len`: the total framed Viterbi body length in bytes.
+///
+/// # Returns
+/// The derived RS-stream length `L`.
+///
+/// # Errors
+/// [`CryptoError::InvalidInput`] if `body_len` is not structurally consistent
+/// with the per-chunk coded formula (a final sub-block that is not a valid
+/// `2·il + 2` coded body).
+pub(crate) fn rs_len_from_body(body_len: usize) -> Result<usize> {
+    Ok(chunk_body_lengths(body_len)?
+        .into_iter()
+        .map(|b| b / 2 - 1)
+        .sum())
+}
+
 /// Maps a `viterbi` 0.0.1 [`DecodeError`] onto the vault's typed error domain.
 ///
 /// A structural length inconsistency (`LengthMismatch` / `InputTooLong`) is
