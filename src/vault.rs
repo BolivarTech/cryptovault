@@ -145,10 +145,9 @@ impl ErrorCorrection for NoFec {
     /// before decode; never panics on adversarial input.
     fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
         if received.len() > MAX_BLOB_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
-                received.len()
-            )));
+            return Err(CryptoError::InvalidInput(
+                "input exceeds maximum size".into(),
+            ));
         }
         Ok(received.len())
     }
@@ -260,8 +259,7 @@ impl CryptoVault {
         }
         if salt.len() != SALT_LEN {
             return Err(CryptoError::InvalidInput(format!(
-                "salt must be exactly {SALT_LEN} bytes, got {}",
-                salt.len()
+                "salt must be exactly {SALT_LEN} bytes"
             )));
         }
         self.kdf.derive_master(password.as_bytes(), salt)
