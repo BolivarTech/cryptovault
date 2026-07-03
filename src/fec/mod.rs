@@ -22,6 +22,9 @@ pub use viterbi::ViterbiCodec;
 
 use crate::error::Result;
 
+/// Default interleave depth `I` (codewords per window) — CCSDS baseline (SR-F2).
+const DEFAULT_INTERLEAVE_DEPTH: usize = 5;
+
 /// A reversible forward-error-correction stage (SR-F1 / SR-F4).
 ///
 /// Implementors are strategy objects composed into the vault behind a trait
@@ -63,4 +66,124 @@ pub trait ErrorCorrection: Send + Sync {
     /// - [`crate::error::CryptoError::ErrorCorrection`] if corruption exceeds the
     ///   code's correction capacity.
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>>;
+}
+
+/// The concatenated FEC stack — Red-phase stub.
+///
+/// Implemented in the Green phase; the stub exists only so the failing tests
+/// compile and fail by assertion.
+pub struct ConcatenatedFec {
+    rs: ReedSolomonCodec,
+    il: Interleaver,
+    vt: ViterbiCodec,
+}
+
+impl ConcatenatedFec {
+    /// Red-phase stub constructor.
+    pub fn new(rs: ReedSolomonCodec, il: Interleaver, vt: ViterbiCodec) -> Self {
+        Self { rs, il, vt }
+    }
+}
+
+impl Default for ConcatenatedFec {
+    fn default() -> Self {
+        Self::new(
+            ReedSolomonCodec,
+            Interleaver::Block(
+                BlockInterleaver::new(DEFAULT_INTERLEAVE_DEPTH)
+                    .expect("DEFAULT_INTERLEAVE_DEPTH is in range"),
+            ),
+            ViterbiCodec,
+        )
+    }
+}
+
+impl ErrorCorrection for ConcatenatedFec {
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        let _ = (&self.il, &self.vt);
+        data.to_vec() // stub: identity, not the real pipeline
+    }
+
+    fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
+        let _ = (&self.rs, &self.il, &self.vt, encoded, pre_len);
+        Ok(Vec::new()) // stub
+    }
+}
+
+#[cfg(test)]
+mod concatenated_tests {
+    use super::{
+        BlockInterleaver, ConcatenatedFec, ErrorCorrection, Interleaver, ReedSolomonCodec,
+        ViterbiCodec,
+    };
+    use crate::error::CryptoError;
+    use crate::RS_BLOCK;
+
+    /// Builds the audited default stack via the explicit DI constructor (depth 5).
+    fn di_stack() -> ConcatenatedFec {
+        ConcatenatedFec::new(
+            ReedSolomonCodec,
+            Interleaver::Block(BlockInterleaver::new(5).unwrap()),
+            ViterbiCodec,
+        )
+    }
+
+    /// SR-F4 / SC-1: the audited `Default` stack and the DI-constructed stack both
+    /// round-trip a multi-codeword payload exactly over a clean channel.
+    #[test]
+    fn test_sr_f4_sc1_clean_channel_roundtrip_default_and_injected() {
+        let payload: Vec<u8> = (0..(3 * RS_BLOCK)).map(|i| (i * 5) as u8).collect();
+        for fec in [ConcatenatedFec::default(), di_stack()] {
+            let enc = fec.encode(&payload);
+            assert_eq!(
+                fec.decode(&enc, payload.len()).unwrap(),
+                payload,
+                "clean-channel round-trip recovers the exact payload"
+            );
+        }
+    }
+
+    /// SR-F4 / SC-2: a channel burst that the interleaver spreads to within the
+    /// Reed-Solomon correction capacity is recovered exactly.
+    #[test]
+    fn test_sc2_noisy_within_capacity_recovers_exactly() {
+        let fec = ConcatenatedFec::default();
+        let payload: Vec<u8> = (0..(5 * RS_BLOCK)).map(|i| (i * 3 + 1) as u8).collect();
+        let mut enc = fec.encode(&payload);
+        // Inject a contiguous burst; the interleaver disperses it across codewords.
+        let start = enc.len() / 3;
+        for byte in enc.iter_mut().skip(start).take(24) {
+            *byte ^= 0xFF;
+        }
+        assert_eq!(
+            fec.decode(&enc, payload.len()).unwrap(),
+            payload,
+            "a within-capacity burst is corrected, payload recovered exactly"
+        );
+    }
+
+    /// SR-F4 / SC-3: corruption beyond the concatenated code's capacity yields a
+    /// typed error, never silently-wrong bytes.
+    #[test]
+    fn test_sc3_corruption_beyond_capacity_is_typed_error_not_silent() {
+        let fec = ConcatenatedFec::default();
+        let payload: Vec<u8> = (0..(2 * RS_BLOCK)).map(|i| (i * 7) as u8).collect();
+        let mut enc = fec.encode(&payload);
+        // Obliterate the first half of the blob — far beyond correction capacity.
+        let half = enc.len() / 2;
+        for byte in enc.iter_mut().take(half) {
+            *byte ^= 0xFF;
+        }
+        let result = fec.decode(&enc, payload.len());
+        // At the FEC layer, beyond-capacity corruption surfaces as a typed FEC or
+        // structural error — never silently-wrong bytes (the AEAD tag is the final
+        // backstop above this layer, SR-R6).
+        assert!(
+            matches!(
+                result,
+                Err(CryptoError::ErrorCorrection(_)) | Err(CryptoError::InvalidInput(_))
+            ),
+            "beyond-capacity decode must be a typed error, got {result:?}"
+        );
+    }
 }
