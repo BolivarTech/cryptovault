@@ -100,4 +100,15 @@ mod tests {
         let m2 = Argon2Kdf.derive_master(b"pw", &[0u8; SALT_LEN]).unwrap();
         assert_eq!(&*m, &*m2);
     }
+
+    #[test]
+    fn test_sr_c3_hkdf_domain_separation_distinct_and_deterministic() {
+        let master = [7u8; KEY_LEN];
+        let a = expand_aead_key(&master).unwrap();
+        let s = expand_interleaver_seed(&master).unwrap();
+        assert_eq!(a.len(), KEY_LEN);
+        assert_ne!(&*a, &master, "seed must never equal raw master");
+        assert_ne!(&*a, &*s, "domain separation: aead key != interleaver seed");
+        assert_eq!(&*a, &*expand_aead_key(&master).unwrap()); // deterministic
+    }
 }
