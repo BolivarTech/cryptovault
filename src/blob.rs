@@ -6,7 +6,144 @@
 
 use crate::error::{CryptoError, Result};
 use crate::fec::viterbi::rs_len_from_body;
-use crate::{MAX_BLOB_LEN, RS_BLOCK};
+use crate::fec::ErrorCorrection;
+use crate::{
+    BLOB_VERSION, HEADER_LEN, MAX_BLOB_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, RS_BLOCK, RS_DATA,
+    TAG_LEN,
+};
+
+/// FEC-encodes a blob: `Viterbi(interleave(RS(version ‖ plaintext_len ‖ body)))`
+/// (SR-R1 / SR-F4).
+///
+/// The header (`version` + little-endian `plaintext_len`) is prepended to `body`
+/// and the whole `protected` payload is run through the injected FEC stack, so
+/// **every byte, header included, is FEC-protected**. The header is *also* bound
+/// as AAD by the caller ([`crate::vault`]) — recoverable *and* tamper-evident.
+///
+/// # Parameters
+/// - `fec`: the error-correction stack to encode through (the audited default is
+///   [`crate::fec::ConcatenatedFec`]).
+/// - `version`: the blob format version (normally [`crate::BLOB_VERSION`]).
+/// - `plaintext_len`: the original plaintext length in bytes — a **header field**
+///   distinct from the RS truncation length `protected_len` (no collision).
+/// - `body`: the AEAD output `nonce ‖ ciphertext ‖ tag`.
+///
+/// # Returns
+/// The FEC-encoded blob bytes (base64 is applied one layer up, in the vault).
+///
+/// # Examples
+///
+/// ```
+/// use cryptovault::blob::{decode_blob, encode_blob};
+/// use cryptovault::fec::ConcatenatedFec;
+/// use cryptovault::BLOB_VERSION;
+///
+/// let fec = ConcatenatedFec::default();
+/// let body = vec![9u8; 40];
+/// let blob = encode_blob(&fec, BLOB_VERSION, 12, &body);
+/// let (v, pl, recovered) = decode_blob(&fec, &blob).unwrap();
+/// assert_eq!((v, pl, recovered), (BLOB_VERSION, 12, body));
+/// ```
+pub fn encode_blob(
+    fec: &dyn ErrorCorrection,
+    version: u8,
+    plaintext_len: u32,
+    body: &[u8],
+) -> Vec<u8> {
+    // protected = version(1B) ‖ plaintext_len(u32 LE, 4B) ‖ body.
+    let mut protected = Vec::with_capacity(HEADER_LEN + body.len());
+    protected.push(version);
+    protected.extend_from_slice(&plaintext_len.to_le_bytes());
+    protected.extend_from_slice(body);
+    fec.encode(&protected)
+}
+
+/// FEC-decodes a received blob and recovers its header and body (SR-R1 / SR-R3 /
+/// SR-R6).
+///
+/// The **safety-critical ordering** (SR-R6) is: structural pre-FEC validation →
+/// FEC-correct → read the error-corrected header → validate it → slice the body.
+/// The `version` and `plaintext_len` are recovered *from inside* the FEC (never
+/// from an unprotected prefix), so a channel-corrupted header is error-corrected
+/// rather than fatal, and the recovered header is what the caller binds as AAD.
+///
+/// Steps:
+/// 1. [`validate_pre_fec`] derives the RS-stream length `L` and rejects an
+///    oversized/malformed blob before any large allocation (SR-R3a / SR-R4).
+/// 2. `recovered_len = (L / RS_BLOCK) · RS_DATA` — the recovered payload length,
+///    derived from the framed length **without** the still-encoded header (SR-R2,
+///    no bootstrapping).
+/// 3. `fec.decode(received, recovered_len)` recovers the protected payload.
+/// 4. Read the error-corrected header at offset 0; validate
+///    `version == BLOB_VERSION`, `plaintext_len ≤ MAX_PLAINTEXT_LEN`, and the
+///    derived `protected_len ≤ recovered_len` (header offsets in bounds).
+/// 5. Return `(version, plaintext_len, body)` where `body = protected[HEADER_LEN
+///    .. protected_len]` (`nonce ‖ ciphertext ‖ tag`).
+///
+/// # Parameters
+/// - `fec`: the error-correction stack (must match the encode side).
+/// - `received`: the raw received blob (post-base64-decode).
+///
+/// # Returns
+/// `(version, plaintext_len, body)` — the recovered header fields and the AEAD
+/// body.
+///
+/// # Errors
+/// [`CryptoError::InvalidInput`] on any structural violation (oversized, bad
+/// framing, unknown version, oversized `plaintext_len`, or a `protected_len`
+/// past the recovered payload); [`CryptoError::ErrorCorrection`] if corruption
+/// exceeds the FEC capacity. **Never panics** on adversarial input (SC-6 /
+/// SR-R5).
+pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u32, Vec<u8>)> {
+    // (1) SR-R3a / SR-R4: structural gate → derived RS-stream length L.
+    let l = validate_pre_fec(received)?;
+    // (2) SR-R2: recovered payload length from the framed length alone — L is a
+    // whole number of RS_BLOCK codewords (guaranteed by validate_pre_fec), each
+    // carrying RS_DATA data bytes.
+    let recovered_len = (l / RS_BLOCK) * RS_DATA;
+    // (3) FEC-correct the whole payload (truncation to recovered_len is a no-op:
+    // RS decode already yields exactly this many data bytes).
+    let protected = fec.decode(received, recovered_len)?;
+    // (4) Read the error-corrected header @0. `recovered_len >= RS_DATA (223)`
+    // by construction, but guard defensively so a codec length bug cannot panic.
+    if protected.len() < HEADER_LEN {
+        return Err(CryptoError::InvalidInput(format!(
+            "recovered payload {} shorter than the {HEADER_LEN}-byte header",
+            protected.len()
+        )));
+    }
+    let version = protected[0];
+    if version != BLOB_VERSION {
+        return Err(CryptoError::InvalidInput(format!(
+            "unsupported blob version {version} (expected {BLOB_VERSION})"
+        )));
+    }
+    // Length-checked above, so this fixed-size conversion cannot panic.
+    let plaintext_len = u32::from_le_bytes(
+        protected[1..HEADER_LEN]
+            .try_into()
+            .expect("HEADER_LEN - 1 == 4 bytes, statically a valid u32"),
+    );
+    if plaintext_len as usize > MAX_PLAINTEXT_LEN {
+        return Err(CryptoError::InvalidInput(format!(
+            "plaintext_len {plaintext_len} exceeds MAX_PLAINTEXT_LEN ({MAX_PLAINTEXT_LEN})"
+        )));
+    }
+    // `protected_len` (RS truncation length) is derived from the header — a name
+    // distinct from `plaintext_len` (the header field). No overflow:
+    // plaintext_len ≤ MAX_PLAINTEXT_LEN so the sum is far below usize::MAX.
+    let protected_len = HEADER_LEN + NONCE_LEN + plaintext_len as usize + TAG_LEN;
+    if protected_len > protected.len() {
+        return Err(CryptoError::InvalidInput(format!(
+            "derived protected_len {protected_len} exceeds recovered payload {}",
+            protected.len()
+        )));
+    }
+    // (5) Slice out body = nonce ‖ ciphertext ‖ tag (padding beyond protected_len
+    // is discarded).
+    let body = protected[HEADER_LEN..protected_len].to_vec();
+    Ok((version, plaintext_len, body))
+}
 
 /// Validates a received FEC body's framing **before** any FEC decode and returns
 /// the derived Reed-Solomon stream length `L` (SR-R3a / SR-R4 / P0-6).
@@ -18,7 +155,7 @@ use crate::{MAX_BLOB_LEN, RS_BLOCK};
 ///
 /// 1. **DoS cap (SR-R4):** `received.len() ≤ `[`MAX_BLOB_LEN`].
 /// 2. **Chunked-Viterbi consistency (SR-R3a):** `received.len()` inverts through
-///    the *same* chunk math the decoder uses ([`rs_len_from_body`] — the single
+///    the *same* chunk math the decoder uses (`rs_len_from_body` — the single
 ///    source of truth), so TX and RX agree byte-for-byte; a body inconsistent
 ///    with the per-chunk coded formula is rejected here.
 /// 3. **RS framing (SR-R3a):** the derived `L` is a **positive whole multiple**
@@ -168,6 +305,106 @@ mod proptests {
         #[test]
         fn prop_sr_r5_validate_pre_fec_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
             let _ = validate_pre_fec(&bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod blob_codec_tests {
+    use super::{decode_blob, encode_blob};
+    use crate::error::CryptoError;
+    use crate::fec::ConcatenatedFec;
+    use crate::{BLOB_VERSION, MAX_PLAINTEXT_LEN, NONCE_LEN, TAG_LEN};
+
+    /// SR-R1 / SR-R6: a blob round-trips the header (`version` + `plaintext_len`)
+    /// and body from *inside* the FEC envelope — the header is recovered
+    /// error-corrected, not read from any unprotected prefix. The body length is
+    /// `NONCE_LEN + plaintext_len + TAG_LEN` (the real `nonce ‖ ct ‖ tag` shape),
+    /// and `decode_blob` strips any RS zero-padding back to exactly that.
+    #[test]
+    fn test_sr_r6_encode_decode_blob_roundtrips_header_from_inside_fec() {
+        let fec = ConcatenatedFec::default();
+        let plaintext_len = 261u32; // header field, distinct from the RS length.
+                                    // body = nonce ‖ ciphertext(plaintext_len) ‖ tag.
+        let body: Vec<u8> = (0..(NONCE_LEN + plaintext_len as usize + TAG_LEN))
+            .map(|i| (i * 7 + 1) as u8)
+            .collect();
+        let blob = encode_blob(&fec, BLOB_VERSION, plaintext_len, &body);
+        let (v, pl, recovered_body) = decode_blob(&fec, &blob).unwrap();
+        assert_eq!(v, BLOB_VERSION, "version recovered from inside the FEC");
+        assert_eq!(pl, plaintext_len, "plaintext_len recovered from the header");
+        assert_eq!(
+            recovered_body, body,
+            "body recovered exactly (padding stripped)"
+        );
+    }
+
+    /// SR-R1: an unknown blob version (recovered from inside the FEC) is rejected
+    /// as a typed error — never mis-parsed as the current format.
+    #[test]
+    fn test_sr_r1_decode_blob_rejects_unknown_version() {
+        let fec = ConcatenatedFec::default();
+        let body: Vec<u8> = (0..40u32).map(|i| i as u8).collect();
+        // Encode under an unsupported version byte.
+        let blob = encode_blob(&fec, 2, 40, &body);
+        assert!(
+            matches!(decode_blob(&fec, &blob), Err(CryptoError::InvalidInput(_))),
+            "version != BLOB_VERSION must be rejected"
+        );
+    }
+
+    /// SR-R6: a header whose `plaintext_len` exceeds `MAX_PLAINTEXT_LEN` is
+    /// rejected before any truncation, never over-allocated.
+    #[test]
+    fn test_sr_r6_decode_blob_rejects_oversized_plaintext_len() {
+        let fec = ConcatenatedFec::default();
+        let body: Vec<u8> = (0..40u32).map(|i| i as u8).collect();
+        let oversized = (MAX_PLAINTEXT_LEN + 1) as u32;
+        let blob = encode_blob(&fec, BLOB_VERSION, oversized, &body);
+        assert!(
+            matches!(decode_blob(&fec, &blob), Err(CryptoError::InvalidInput(_))),
+            "plaintext_len > MAX_PLAINTEXT_LEN must be rejected"
+        );
+    }
+
+    /// SR-R6: a `plaintext_len` larger than the recovered payload (so the derived
+    /// `protected_len` runs past the recovered bytes) is rejected as structurally
+    /// invalid, never a slice panic.
+    #[test]
+    fn test_sr_r6_decode_blob_rejects_protected_len_past_recovered() {
+        let fec = ConcatenatedFec::default();
+        let body: Vec<u8> = (0..40u32).map(|i| i as u8).collect();
+        // Plausible plaintext_len (< cap) but far larger than the tiny body →
+        // protected_len > recovered_len.
+        let blob = encode_blob(&fec, BLOB_VERSION, 100_000, &body);
+        assert!(
+            matches!(decode_blob(&fec, &blob), Err(CryptoError::InvalidInput(_))),
+            "protected_len past recovered payload must be rejected"
+        );
+    }
+
+    /// SR-R1 / SC-8: the empty-plaintext degenerate case (`plaintext_len = 0`,
+    /// so the body is just `nonce ‖ tag` = 28 bytes) round-trips through the blob
+    /// codec — there is always ≥ 1 RS codeword.
+    #[test]
+    fn test_sr_r1_empty_plaintext_roundtrips() {
+        let fec = ConcatenatedFec::default();
+        let body: Vec<u8> = (0..(NONCE_LEN + TAG_LEN)).map(|i| i as u8).collect();
+        let blob = encode_blob(&fec, BLOB_VERSION, 0, &body);
+        let (v, pl, recovered) = decode_blob(&fec, &blob).unwrap();
+        assert_eq!(v, BLOB_VERSION);
+        assert_eq!(pl, 0);
+        assert_eq!(recovered, body, "nonce ‖ tag body round-trips");
+    }
+
+    /// SC-6 / SR-R5: `decode_blob` never panics on adversarial bytes — a junk
+    /// buffer yields a typed error, never a crash.
+    #[test]
+    fn test_sc6_decode_blob_never_panics_on_junk() {
+        let fec = ConcatenatedFec::default();
+        for len in [0usize, 1, 3, 4, 202, 512] {
+            let junk: Vec<u8> = (0..len).map(|i| (i * 13 + 5) as u8).collect();
+            let _ = decode_blob(&fec, &junk); // must return, never panic
         }
     }
 }
