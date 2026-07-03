@@ -13,9 +13,37 @@
 
 use aes_gcm_siv::aead::{Aead, KeyInit, Payload};
 use aes_gcm_siv::{Aes256GcmSiv, Key, Nonce};
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 use crate::error::{CryptoError, Result};
 use crate::{KEY_LEN, NONCE_LEN};
+
+/// Sample a fresh [`crate::NONCE_LEN`]-byte AEAD nonce from the operating
+/// system CSPRNG (`OsRng`) — a distinct nonce per encrypted record (SR-C1).
+///
+/// # Returns
+/// A [`crate::NONCE_LEN`]-byte array filled with cryptographically secure
+/// random bytes.
+///
+/// # Errors
+/// [`CryptoError::Cipher`] if `OsRng` fails to produce entropy. On failure the
+/// nonce is **never** returned zero/weak and the caller must abort the
+/// encryption — the function neither panics nor yields a predictable nonce.
+///
+/// # Examples
+/// ```
+/// use cryptovault::cipher::sample_nonce;
+/// let nonce = sample_nonce().unwrap();
+/// assert_eq!(nonce.len(), 12);
+/// ```
+pub fn sample_nonce() -> Result<[u8; NONCE_LEN]> {
+    let mut nonce = [0u8; NONCE_LEN];
+    OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|e| CryptoError::Cipher(format!("OsRng nonce sampling failed: {e}")))?;
+    Ok(nonce)
+}
 
 /// Strategy trait for authenticated encryption with associated data (AEAD).
 ///
