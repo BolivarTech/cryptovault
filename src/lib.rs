@@ -113,11 +113,16 @@ pub const MAX_B64_LEN: usize = MAX_BLOB_LEN * 4 / 3 + 4;
 /// correction capacity a blob fails entirely. Callers should frame large data
 /// into several small blobs rather than one big one.
 ///
-/// PROVISIONAL placeholder — hidden from the public API until the Phase-4
-/// preliminary bit-error-rate pass produces a defensible value, then unhidden
-/// and finalized by Task 23b (spec SR-F6). **Not user-facing yet.**
+/// PROVISIONAL (`128 KiB`) — derived from the Phase-4 preliminary bit-error-rate
+/// pass (`tests/ber_provisional.rs`) over the **outer** FEC only (RS(255,223) +
+/// block interleaver, no Viterbi yet). At a 0.2% binary-symmetric channel the
+/// per-codeword failure probability is ≈9.7e-7, keeping blob recovery ≥99.9% up
+/// to ≈223 KiB; `128 KiB` sits comfortably below that with margin for the
+/// all-or-nothing cliff. Because the inner Viterbi code (Task 9) adds coding
+/// gain, this is a **conservative lower bound**. Hidden from the public API and
+/// finalized by the full Task 23b sweep (spec SR-F6). **Not user-facing yet.**
 #[doc(hidden)]
-pub const RECOMMENDED_MAX_PAYLOAD: usize = 64 * 1024;
+pub const RECOMMENDED_MAX_PAYLOAD: usize = 128 * 1024;
 
 #[cfg(test)]
 mod tests {
