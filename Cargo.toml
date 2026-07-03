@@ -1,7 +1,8 @@
 [package]
 name = "cryptovault"
-version = "0.0.1"
+version = "2.0.0"
 edition = "2021"
+rust-version = "1.70"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Self-contained authenticated encryption vault: Argon2id KDF + AES-256-GCM-SIV + Reed-Solomon FEC, with envelope (DEK/KEK) key wrapping."
 license = "MIT OR Apache-2.0"
@@ -14,10 +15,15 @@ categories = ["cryptography"]
 # Authenticated encryption + KDF (vetted RustCrypto primitives — not rolled here).
 aes-gcm-siv = "0.11"
 argon2 = "0.5"
-base64 = "0.22"
-rand = "0.8"
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20 = "0.9"        # CSPRNG interleaver keystream (Task 8).
+subtle = "2"            # constant-time secret/tag comparison.
 zeroize = "1.8"
-# FEC: temporary third-party baseline. HANDOFF: switch to the `reedsolomon` crate.
-reed-solomon = "0.2"
+rand = "0.8"
+base64 = "0.22"
+# FEC — BolivarTech's own crates (not security primitives): RS(255,223) + K=7 R=1/2 Viterbi.
+reedsolomon = "0.1"
+viterbi = "0.0.1"
 
 [dev-dependencies]
