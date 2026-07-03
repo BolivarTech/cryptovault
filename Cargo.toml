@@ -23,8 +23,11 @@ zeroize = "1.8"
 rand = "0.8"
 base64 = "0.22"
 # FEC — BolivarTech's own crates (not security primitives): RS(255,223) + K=7 R=1/2 Viterbi.
-reedsolomon = "0.1"
-viterbi = "0.0.1"
+# Exact-version pins: the concatenated wire format is locked to these codec
+# releases, so a minor-version bump must be an explicit, reviewed change — never
+# an accidental drift that could alter bit-packing/framing.
+reedsolomon = "=0.1.0"
+viterbi = "=0.0.1"
 
 [dev-dependencies]
 proptest = "1"          # property-based no-panic / round-trip coverage (SR-R5).
