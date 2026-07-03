@@ -20,7 +20,8 @@ pub use interleaver::{BlockInterleaver, CsprngLayer, Interleaver};
 pub use rs::ReedSolomonCodec;
 pub use viterbi::ViterbiCodec;
 
-use crate::error::Result;
+use crate::blob::validate_pre_fec;
+use crate::error::{CryptoError, Result};
 
 /// Default interleave depth `I` (codewords per window) — CCSDS baseline (SR-F2).
 const DEFAULT_INTERLEAVE_DEPTH: usize = 5;
@@ -165,13 +166,13 @@ impl ErrorCorrection for ConcatenatedFec {
     ///   concatenated code's correction capacity.
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
         // (1) SR-R3a: structural pre-FEC gate → expected RS-stream length.
-        let l = crate::blob::validate_pre_fec(encoded)?;
+        let l = validate_pre_fec(encoded)?;
         // (2) Invert the inner Viterbi code.
         let rs_stream = self.vt.decode(encoded)?;
         // (3) SR-R3b: the actual decoded length must match the pre-derived `l`
         // (defends against a Viterbi-crate length bug).
         if rs_stream.len() != l {
-            return Err(crate::error::CryptoError::InvalidInput(format!(
+            return Err(CryptoError::InvalidInput(format!(
                 "post-Viterbi RS-stream length {} disagrees with the framed length {l}",
                 rs_stream.len()
             )));
