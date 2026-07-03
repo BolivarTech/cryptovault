@@ -436,6 +436,15 @@ impl CryptoVault {
     /// independently, and a single bad frame does not doom the rest. Very large
     /// single blobs are correspondingly more fragile.
     ///
+    /// For reliable recovery keep each plaintext at or below
+    /// [`RECOMMENDED_MAX_PAYLOAD`](crate::RECOMMENDED_MAX_PAYLOAD) (`128 KiB`) —
+    /// the BER-derived practical ceiling (see `docs/ber-analysis.md`): at that
+    /// size a blob recovers with probability ≈1.0 over the analyzed operating
+    /// channel, with wide margin against the recovery waterfall. The absolute
+    /// upper bound is [`MAX_PLAINTEXT_LEN`] (10 MiB),
+    /// but blobs approaching it survive channel noise far less reliably; split
+    /// large data into `RECOMMENDED_MAX_PAYLOAD`-sized frames.
+    ///
     /// # Parameters
     /// - `key`: the session **master** from [`derive_key`](Self::derive_key)
     ///   (HKDF-expanded internally into the AEAD sub-key — never a raw AES key).

@@ -125,22 +125,27 @@ pub const MAX_BLOB_LEN: usize = {
 /// (SR-R4 DoS guard). Base64 expands ~`4/3`; `+4` covers padding slack.
 pub const MAX_B64_LEN: usize = MAX_BLOB_LEN * 4 / 3 + 4;
 
-/// Recommended maximum plaintext per blob for good channel recovery
-/// (BER-derived).
+/// Recommended maximum plaintext per blob for reliable channel recovery
+/// (`128 KiB`, BER-derived).
 ///
-/// The FEC recovery guarantee is per-blob and all-or-nothing: past the
-/// correction capacity a blob fails entirely. Callers should frame large data
-/// into several small blobs rather than one big one.
+/// FEC recovery is **all-or-nothing per blob**: if channel corruption exceeds the
+/// concatenated code's capacity *anywhere* in the blob, the whole blob fails to
+/// decrypt (the AEAD needs the complete ciphertext — there is no partial
+/// recovery). This cliff is **per-blob**, so callers SHOULD frame large data into
+/// several blobs at or below this size rather than one large blob: each frame
+/// then fails or recovers independently, and one bad frame does not doom the rest.
 ///
-/// PROVISIONAL (`128 KiB`) — derived from the Phase-4 preliminary bit-error-rate
-/// pass (`tests/ber_provisional.rs`) over the **outer** FEC only (RS(255,223) +
-/// block interleaver, no Viterbi yet). At a 0.2% binary-symmetric channel the
-/// per-codeword failure probability is ≈9.7e-7, keeping blob recovery ≥99.9% up
-/// to ≈223 KiB; `128 KiB` sits comfortably below that with margin for the
-/// all-or-nothing cliff. Because the inner Viterbi code (Task 9) adds coding
-/// gain, this is a **conservative lower bound**. Hidden from the public API and
-/// finalized by the full Task 23b sweep (spec SR-F6). **Not user-facing yet.**
-#[doc(hidden)]
+/// **Validated (no longer provisional).** Derived from the full concatenated-FEC
+/// availability analysis in `tests/ber_analysis.rs` (spec SR-F6) — the *complete*
+/// `Viterbi(interleave(RS(·)))` pipeline over a deterministic-seed binary-
+/// symmetric channel, summarized in `docs/ber-analysis.md`. The measured
+/// per-codeword post-FEC failure probability is effectively **0 for channel bit-
+/// error rates up to ≈5%**, with a sharp recovery waterfall near **≈6%** and total
+/// loss by **≈10%**. At the documented operating point of **0.5% BSC** a blob
+/// recovers with probability ≈1.0 up to the 10 MiB plaintext cap; `128 KiB` is a
+/// deliberately **conservative** ceiling that keeps blob-level recovery ≥99.9%
+/// with wide margin against the waterfall and against real-channel bursts the
+/// memoryless BSC model understates.
 pub const RECOMMENDED_MAX_PAYLOAD: usize = 128 * 1024;
 
 #[cfg(test)]
@@ -161,5 +166,9 @@ mod tests {
         assert_eq!(RS_DATA + RS_PARITY, RS_BLOCK);
         assert_eq!(RS_INTERLEAVE_MAX, 16);
         assert!(MAX_BLOB_LEN > MAX_PLAINTEXT_LEN);
+        // Finalized BER-derived value (Task 23b / SR-F6); pinned so a change is a
+        // deliberate, reviewed edit. See `docs/ber-analysis.md`.
+        assert_eq!(RECOMMENDED_MAX_PAYLOAD, 128 * 1024);
+        assert!(RECOMMENDED_MAX_PAYLOAD < MAX_PLAINTEXT_LEN);
     }
 }
