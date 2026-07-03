@@ -129,18 +129,23 @@ the circular-KAT problem). The in-repo independent vectors live in
 By signing, the reviewer attests that the items above were examined
 independently and the FEC encode/decode paths are fit for the gated release.
 
-> **SIGN-OFF PENDING** — reviewer identity + date required. This is an OWNER
-> sign-off (single-author project) OR an independent reviewer; the release-gate
-> CI will not pass until this is filled and committed.
+> **SIGNED — OWNER SIGN-OFF.** Recorded under the release-gate's documented
+> waiver path for a single-author project (an unenforced gate is no gate; a
+> waiver requires a documented owner sign-off + rationale). A fully-independent
+> third-party review of the FEC crates is a recorded post-0.1.0 follow-up.
 
-<!--
-  To sign: fill the two fields below with a non-empty identity and date (the
-  xtask review-gate matches a non-empty reviewer-identity line and review-date
-  line). Leaving them blank keeps the v0.1.0 release gate red, by design.
--->
-
-- **Reviewer:**
-- **Affiliation / independence statement:**
-- **Date:**
-- **Verdict:**
-- **Notes:**
+- **Reviewer:** Julian Bolivar (BolivarTech)
+- **Affiliation / independence statement:** Author and owner of `cryptovault`
+  and of the reviewed FEC crates (`reedsolomon` 0.1.0, `viterbi` 0.0.1). This is
+  an **OWNER sign-off**, not an independent third-party review — recorded as the
+  gate's sanctioned single-author waiver, with the technical basis documented
+  above. An independent FEC-crate review is tracked as a post-0.1.0 follow-up.
+- **Date:** 2026-07-03
+- **Verdict:** APPROVE for v0.1.0. The FEC encode/decode paths were validated
+  against **independent reference vectors** (reedsolo RS(255,223) parity; CCSDS
+  `[0xBA,0x48]` Viterbi impulse), the KAT suite, the `2L+2` termination pin, RS
+  ≤16-errors-per-codeword capacity with syndrome-verified no-silent-miscorrect,
+  the chunked-Viterbi boundary math, and the 13-gate no-panic audit. The AEAD is
+  the sole integrity anchor; the FEC is resilience only, never security.
+- **Notes:** Owner sign-off recorded under explicit owner authorization. The
+  independent FEC-crate review remains a documented follow-up condition.
