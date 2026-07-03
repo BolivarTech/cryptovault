@@ -12,8 +12,10 @@
 //! decode fails loud (a typed [`crate::error::CryptoError`]), never returning
 //! wrong-but-plausible bytes — the AEAD tag is the final integrity anchor.
 
+pub mod interleaver;
 pub mod rs;
 
+pub use interleaver::BlockInterleaver;
 pub use rs::ReedSolomonCodec;
 
 use crate::error::Result;
