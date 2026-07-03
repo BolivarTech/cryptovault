@@ -23,6 +23,17 @@ use crate::RS_BLOCK;
 /// typed [`CryptoError`] domain.
 pub struct ReedSolomonCodec;
 
+/// Number of whole [`RS_BLOCK`]-byte codewords in a `byte_len`-byte RS stream,
+/// or `None` if `byte_len` is not a whole multiple of [`RS_BLOCK`] (a
+/// structurally invalid stream — SR-F1 / SR-R3).
+const fn block_count(byte_len: usize) -> Option<usize> {
+    if byte_len % RS_BLOCK == 0 {
+        Some(byte_len / RS_BLOCK)
+    } else {
+        None
+    }
+}
+
 impl ErrorCorrection for ReedSolomonCodec {
     fn encode(&self, data: &[u8]) -> Vec<u8> {
         ReedSolomon::default()
@@ -38,7 +49,7 @@ impl ErrorCorrection for ReedSolomonCodec {
         // SR-F1 / SR-R3: an RS stream is a whole number of `RS_BLOCK`-byte
         // codewords. Reject a structurally invalid length up front so the FEC
         // crate never parses adversarial framing (no panic on hostile input).
-        if encoded.len() % RS_BLOCK != 0 {
+        if block_count(encoded.len()).is_none() {
             return Err(CryptoError::InvalidInput(format!(
                 "RS stream length {} is not a multiple of RS_BLOCK ({RS_BLOCK})",
                 encoded.len()
