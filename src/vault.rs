@@ -180,11 +180,8 @@ impl CryptoVault {
     /// [`CryptoError::InvalidInput`] if `pt` exceeds the plaintext cap;
     /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
     /// nonce sampling or AEAD failure.
-    // Byte core: the shared pipeline behind the public UTF-8 / envelope front
-    // doors. Its (and `decrypt_bytes`') only non-test callers are added by Task
-    // 17 (`encrypt_with_key`) / Task 18 (`wrap_key`); until then it is exercised
-    // by the byte-core tests. Remove this `allow` when Task 17 lands.
-    #[allow(dead_code)]
+    // Byte core: the shared pipeline behind the public UTF-8 (Task 17) and
+    // envelope (Task 18) front doors.
     fn encrypt_bytes(&self, master: &[u8], pt: &[u8]) -> Result<String> {
         // SR-R4: reject an over-cap plaintext before doing any work.
         if pt.len() > MAX_PLAINTEXT_LEN {
@@ -238,9 +235,8 @@ impl CryptoVault {
     /// base64; [`CryptoError::ErrorCorrection`] beyond FEC capacity;
     /// [`CryptoError::Cipher`] if the AEAD tag fails (wrong master, wrong AAD, or
     /// tampering beyond FEC capacity). **Never panics** on adversarial input.
-    // Byte core: see `encrypt_bytes`. Non-test callers arrive with Task 17/18;
-    // remove this `allow` then.
-    #[allow(dead_code)]
+    // Byte core: see `encrypt_bytes`. Shared by the public UTF-8 / envelope
+    // front doors.
     fn decrypt_bytes(&self, master: &[u8], b64: &str) -> Result<Zeroizing<Vec<u8>>> {
         // (1) SR-R4: cap the base64 length BEFORE base64-decode allocates.
         if b64.len() > MAX_B64_LEN {
@@ -274,6 +270,82 @@ impl CryptoVault {
         let aead_key = expand_aead_key(master)?;
         let pt = self.cipher.decrypt(&aead_key, nonce, &header, ct)?;
         Ok(Zeroizing::new(pt))
+    }
+
+    /// Encrypts and authenticates a UTF-8 string into a base64 blob — the public
+    /// string front door over the byte core (SR-C1/C3/C4, SR-R4).
+    ///
+    /// A thin wrapper that treats `plaintext` as its UTF-8 bytes and runs the
+    /// full AEAD-then-FEC pipeline; recover it with
+    /// [`decrypt_with_key`](Self::decrypt_with_key).
+    ///
+    /// # Payload sizing (SR-F6)
+    /// FEC recovery is **all-or-nothing per blob**: if channel corruption
+    /// exceeds the concatenated code's capacity anywhere in the blob, the
+    /// **whole** blob fails to decrypt (the AEAD needs the complete ciphertext).
+    /// This cliff is **per-blob**, so on a noisy channel prefer **framing large
+    /// data into multiple small blobs** — each blob then fails or recovers
+    /// independently, and a single bad frame does not doom the rest. Very large
+    /// single blobs are correspondingly more fragile.
+    ///
+    /// # Parameters
+    /// - `key`: the session **master** from [`derive_key`](Self::derive_key)
+    ///   (HKDF-expanded internally into the AEAD sub-key — never a raw AES key).
+    /// - `plaintext`: the UTF-8 string to encrypt (its byte length must be
+    ///   `≤ `[`crate::MAX_PLAINTEXT_LEN`]).
+    ///
+    /// # Returns
+    /// The base64-encoded blob.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if the plaintext exceeds the cap;
+    /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
+    /// nonce sampling or AEAD failure.
+    ///
+    /// # Examples
+    /// ```
+    /// use cryptovault::vault::CryptoVault;
+    /// let vault = CryptoVault::default();
+    /// let master = vault.derive_key("correct horse battery staple", &[0u8; 16]).unwrap();
+    /// let blob = vault.encrypt_with_key(&master, "small message").unwrap();
+    /// let plain = vault.decrypt_with_key(&master, &blob).unwrap();
+    /// assert_eq!(&*plain, "small message");
+    /// ```
+    pub fn encrypt_with_key(&self, key: &[u8], plaintext: &str) -> Result<String> {
+        self.encrypt_bytes(key, plaintext.as_bytes())
+    }
+
+    /// Decrypts and verifies a base64 blob produced by
+    /// [`encrypt_with_key`](Self::encrypt_with_key), returning the recovered
+    /// UTF-8 string in a [`Zeroizing`] buffer (SR-C8).
+    ///
+    /// Runs the byte core, then validates that the recovered plaintext is valid
+    /// UTF-8; invalid UTF-8 is rejected rather than lossily decoded.
+    ///
+    /// # Parameters
+    /// - `key`: the session master from [`derive_key`](Self::derive_key).
+    /// - `blob`: the base64 blob (`≤ `[`crate::MAX_B64_LEN`] characters).
+    ///
+    /// # Returns
+    /// The recovered string in a [`Zeroizing`] buffer (wiped on drop, SR-C8).
+    ///
+    /// # Errors
+    /// [`CryptoError::Encoding`] if the base64 is non-canonical **or** the
+    /// recovered plaintext is not valid UTF-8; [`CryptoError::InvalidInput`] on
+    /// an oversized or structurally malformed blob;
+    /// [`CryptoError::ErrorCorrection`] beyond FEC capacity;
+    /// [`CryptoError::Cipher`] if the AEAD tag fails. **Never panics** on
+    /// adversarial input.
+    pub fn decrypt_with_key(&self, key: &[u8], blob: &str) -> Result<Zeroizing<String>> {
+        let bytes = self.decrypt_bytes(key, blob)?;
+        // Validate UTF-8 on the borrowed bytes; the transient `bytes` buffer is
+        // zeroized on drop regardless of the branch taken.
+        match core::str::from_utf8(&bytes) {
+            Ok(s) => Ok(Zeroizing::new(s.to_owned())),
+            Err(e) => Err(CryptoError::Encoding(format!(
+                "decrypted plaintext is not valid UTF-8: {e}"
+            ))),
+        }
     }
 }
 
@@ -359,6 +431,60 @@ mod construction_tests {
         );
         // pre_len beyond the input length is clamped — never a slice panic.
         assert_eq!(NoFec.decode(&data, 999).unwrap(), data, "pre_len clamped");
+    }
+}
+
+#[cfg(test)]
+mod string_frontdoor_tests {
+    use super::CryptoVault;
+    use crate::error::CryptoError;
+    use crate::KEY_LEN;
+
+    /// SC-1 / SR-C8: a UTF-8 string encrypted then decrypted under the same
+    /// master round-trips exactly through the public string front doors.
+    #[test]
+    fn test_sc1_encrypt_decrypt_with_key_roundtrip() {
+        let v = CryptoVault::default();
+        let master = [5u8; KEY_LEN];
+        let plaintext = "café — attack at dawn, résilient over a noisy channel ✓";
+        let blob = v.encrypt_with_key(&master, plaintext).unwrap();
+        let recovered = v.decrypt_with_key(&master, &blob).unwrap();
+        assert_eq!(&**recovered, plaintext, "string round-trip is exact");
+    }
+
+    /// SC-1: the empty string round-trips (degenerate but valid).
+    #[test]
+    fn test_sc1_empty_string_roundtrips() {
+        let v = CryptoVault::default();
+        let master = [1u8; KEY_LEN];
+        let blob = v.encrypt_with_key(&master, "").unwrap();
+        assert!(v.decrypt_with_key(&master, &blob).unwrap().is_empty());
+    }
+
+    /// SR-C8 / SR-F6: a blob whose recovered plaintext is not valid UTF-8 is
+    /// rejected with a typed `Encoding` error rather than lossy/garbled text.
+    #[test]
+    fn test_sr_c8_decrypt_with_key_rejects_non_utf8_plaintext() {
+        let v = CryptoVault::default();
+        let master = [8u8; KEY_LEN];
+        // 0xFF is never a valid UTF-8 byte; wrap it via the raw byte core.
+        let blob = v.encrypt_bytes(&master, &[0xFF, 0xFE, 0x00]).unwrap();
+        assert!(matches!(
+            v.decrypt_with_key(&master, &blob),
+            Err(CryptoError::Encoding(_))
+        ));
+    }
+
+    /// SC-5: decrypting a string blob under a different master fails the AEAD
+    /// tag with a typed `Cipher` error — no key material is revealed.
+    #[test]
+    fn test_sc5_decrypt_with_key_wrong_master_is_cipher_error() {
+        let v = CryptoVault::default();
+        let blob = v.encrypt_with_key(&[1u8; KEY_LEN], "secret text").unwrap();
+        assert!(matches!(
+            v.decrypt_with_key(&[2u8; KEY_LEN], &blob),
+            Err(CryptoError::Cipher(_))
+        ));
     }
 }
 
