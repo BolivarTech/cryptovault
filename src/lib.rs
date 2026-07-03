@@ -113,10 +113,10 @@ pub const HEADER_LEN: usize = 5;
 
 /// Viterbi zero-tail overhead (`2L + 2` ⇒ `+2` bytes).
 ///
-/// PROVISIONAL — confirmed by the Task 9 (P0-3) Viterbi trellis KAT against the
-/// actual `viterbi` 0.0.1 crate. If the crate's real termination differs, this
-/// constant is corrected there (and [`MAX_BLOB_LEN`] recomputes accordingly)
-/// before the blob format is locked.
+/// Validated: the `2L + 2` per-chunk relation is confirmed by the Task 9 (P0-3)
+/// Viterbi termination KAT (`test_p0_3_viterbi_termination_length_and_roundtrip`)
+/// against the actual `viterbi` 0.0.1 crate, so the blob format and the derived
+/// [`MAX_BLOB_LEN`] rest on a verified, locked formula.
 pub const TERMINATION_OVERHEAD: usize = 2;
 
 /// On-disk blob format version (single concatenated format, no legacy).
