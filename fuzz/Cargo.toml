@@ -1,0 +1,47 @@
+# cargo-fuzz workspace for cryptovault — SR-R5 no-panic robustness (Task 21).
+#
+# This is a SEPARATE workspace (empty [workspace] table below) so `cargo build`,
+# `cargo nextest`, `cargo clippy`, etc. run at the repo root never pull the fuzz
+# crate into the main crate's gates. Build/run the targets explicitly with
+# `cargo +nightly fuzz build` / `cargo +nightly fuzz run <target>`.
+[package]
+name = "cryptovault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The crate under test — drives the public decrypt/unwrap entry points.
+cryptovault = { path = ".." }
+# The own FEC crates, driven DIRECTLY (SR-F5): prove no reachable panic through
+# reedsolomon / viterbi on arbitrary bytes, independent of cryptovault's gates.
+reedsolomon = "0.1"
+viterbi = "0.0.1"
+
+[[bin]]
+name = "decrypt"
+path = "fuzz_targets/decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unwrap"
+path = "fuzz_targets/unwrap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fec_crates"
+path = "fuzz_targets/fec_crates.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace so the parent crate's gates never build the fuzz targets.
+[workspace]
