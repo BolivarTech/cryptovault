@@ -1,15 +1,24 @@
 [package]
 name = "cryptovault"
-version = "2.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
-description = "Self-contained authenticated encryption vault: Argon2id KDF + AES-256-GCM-SIV + Reed-Solomon FEC, with envelope (DEK/KEK) key wrapping."
+description = "Authenticated encryption resilient over interference channels: AES-256-GCM-SIV over Argon2id/HKDF, followed by a concatenated Reed-Solomon + interleaver + Viterbi FEC."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/BolivarTech/cryptovault"
 readme = "README.md"
-keywords = ["cryptography", "encryption", "aead", "argon2", "vault"]
+keywords = ["cryptography", "aead", "encryption", "reed-solomon", "fec"]
 categories = ["cryptography"]
+# Dev-only artifacts kept out of the published crate (knowledge graph, scratch
+# specs, local runners). The crate ships source, tests, docs, and licenses only.
+exclude = [
+    "graphify-out/",
+    "scripts/",
+    "run-tests.py",
+    "VITERBI_CRATE_SPEC.md",
+    ".github/",
+]
 
 [dependencies]
 # Authenticated encryption + KDF (vetted RustCrypto primitives — not rolled here).
