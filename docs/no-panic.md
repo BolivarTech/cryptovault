@@ -59,7 +59,7 @@ Three `libFuzzer` targets under `fuzz/fuzz_targets/`:
 | Target | Drives | Contract |
 |--------|--------|----------|
 | `decrypt` | `CryptoVault::decrypt_with_key(&key, from_utf8_lossy(data))` | full decrypt path (gates 1–13) always returns; never panics |
-| `unwrap` | `CryptoVault::unwrap_key(&kek, from_utf8_lossy(data))` | envelope path (gates 1–12) always returns; never panics |
+| `unwrap` | `CryptoVault::unwrap_key(&kek, &salt, from_utf8_lossy(data))` | envelope path (gates 1–12) always returns; never panics |
 | `fec_crates` | `reedsolomon::ReedSolomon::{decode,decode_framed}` + `viterbi::CcsdsViterbiDecoder::decode_block` **directly, unguarded** | the own FEC crates are panic-safe on arbitrary bytes (SR-F5) |
 
 ### Local smoke run (2026-07-03, Windows 11 MSVC, nightly)
