@@ -50,16 +50,20 @@ impl ErrorCorrection for ReedSolomonCodec {
         // codewords. Reject a structurally invalid length up front so the FEC
         // crate never parses adversarial framing (no panic on hostile input).
         if block_count(encoded.len()).is_none() {
-            return Err(CryptoError::InvalidInput(format!(
-                "RS stream length {} is not a multiple of RS_BLOCK ({RS_BLOCK})",
-                encoded.len()
-            )));
+            // SR-R7: generic, oracle-free message — no exact length or FEC-internal
+            // detail is echoed back to a probing attacker.
+            return Err(CryptoError::InvalidInput("malformed blob".into()));
         }
         ReedSolomon::default()
             .decode(encoded, pre_len)
+            // SR-R7: map onto fixed, generic messages — never surface the
+            // `reedsolomon` crate's internal error string (which can embed
+            // codeword indices / lengths that leak structural specifics).
             .map_err(|e| match e {
-                RsError::Uncorrectable(m) => CryptoError::ErrorCorrection(m),
-                RsError::InvalidInput(m) => CryptoError::InvalidInput(m),
+                RsError::Uncorrectable(_) => {
+                    CryptoError::ErrorCorrection("forward error correction failed".into())
+                }
+                RsError::InvalidInput(_) => CryptoError::InvalidInput("malformed blob".into()),
             })
     }
 
@@ -73,17 +77,16 @@ impl ErrorCorrection for ReedSolomonCodec {
     /// `(blocks · RS_DATA)`. Never panics on adversarial input.
     fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
         if received.len() > MAX_BLOB_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
-                received.len()
-            )));
+            // SR-R7: a length cap is not an oracle, but avoid echoing the exact
+            // received length — a fixed, generic message suffices.
+            return Err(CryptoError::InvalidInput(
+                "input exceeds maximum size".into(),
+            ));
         }
         match block_count(received.len()) {
             Some(blocks) if blocks >= 1 => Ok(blocks * RS_DATA),
-            _ => Err(CryptoError::InvalidInput(format!(
-                "RS stream length {} is not a positive multiple of RS_BLOCK ({RS_BLOCK})",
-                received.len()
-            ))),
+            // SR-R7: generic, oracle-free structural rejection.
+            _ => Err(CryptoError::InvalidInput("malformed blob".into())),
         }
     }
 }

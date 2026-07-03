@@ -107,17 +107,14 @@ pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u3
     // (3) Read the error-corrected header @0. `recovered_len >= RS_DATA (223)`
     // by construction for the RS path, but guard defensively so a codec length
     // bug cannot panic.
+    // SR-R7: all decode-path rejections use fixed, generic messages — no
+    // recovered length, offset, or version value is echoed to a probing attacker.
     if protected.len() < HEADER_LEN {
-        return Err(CryptoError::InvalidInput(format!(
-            "recovered payload {} shorter than the {HEADER_LEN}-byte header",
-            protected.len()
-        )));
+        return Err(CryptoError::InvalidInput("malformed blob".into()));
     }
     let version = protected[0];
     if version != BLOB_VERSION {
-        return Err(CryptoError::InvalidInput(format!(
-            "unsupported blob version {version} (expected {BLOB_VERSION})"
-        )));
+        return Err(CryptoError::InvalidInput("unsupported blob version".into()));
     }
     // Length-checked above, so this fixed-size conversion cannot panic.
     let plaintext_len = u32::from_le_bytes(
@@ -126,19 +123,14 @@ pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u3
             .expect("HEADER_LEN - 1 == 4 bytes, statically a valid u32"),
     );
     if plaintext_len as usize > MAX_PLAINTEXT_LEN {
-        return Err(CryptoError::InvalidInput(format!(
-            "plaintext_len {plaintext_len} exceeds MAX_PLAINTEXT_LEN ({MAX_PLAINTEXT_LEN})"
-        )));
+        return Err(CryptoError::InvalidInput("malformed blob".into()));
     }
     // `protected_len` (RS truncation length) is derived from the header — a name
     // distinct from `plaintext_len` (the header field). No overflow:
     // plaintext_len ≤ MAX_PLAINTEXT_LEN so the sum is far below usize::MAX.
     let protected_len = HEADER_LEN + NONCE_LEN + plaintext_len as usize + TAG_LEN;
     if protected_len > protected.len() {
-        return Err(CryptoError::InvalidInput(format!(
-            "derived protected_len {protected_len} exceeds recovered payload {}",
-            protected.len()
-        )));
+        return Err(CryptoError::InvalidInput("malformed blob".into()));
     }
     // (4) Slice out body = nonce ‖ ciphertext ‖ tag (padding beyond protected_len
     // is discarded).
@@ -189,21 +181,20 @@ pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u3
 /// assert!(validate_pre_fec(&[0u8; 3]).is_err());
 /// ```
 pub fn validate_pre_fec(received: &[u8]) -> Result<usize> {
-    // (1) SR-R4: reject an over-cap blob before any FEC allocation.
+    // (1) SR-R4: reject an over-cap blob before any FEC allocation. SR-R7: a
+    // length cap is not an oracle, but avoid echoing the exact received length.
     if received.len() > MAX_BLOB_LEN {
-        return Err(CryptoError::InvalidInput(format!(
-            "received blob length {} exceeds MAX_BLOB_LEN ({MAX_BLOB_LEN})",
-            received.len()
-        )));
+        return Err(CryptoError::InvalidInput(
+            "input exceeds maximum size".into(),
+        ));
     }
     // (2) SR-R3a: derive L via the shared chunked-Viterbi math (validates the
     // per-chunk coded structure: even, minimum-size final sub-block).
     let l = rs_len_from_body(received.len())?;
     // (3) SR-R3a: the RS stream must be a positive whole number of codewords.
+    // SR-R7: generic, oracle-free message — no derived length is echoed back.
     if l == 0 || l % RS_BLOCK != 0 {
-        return Err(CryptoError::InvalidInput(format!(
-            "derived RS-stream length {l} is not a positive multiple of RS_BLOCK ({RS_BLOCK})"
-        )));
+        return Err(CryptoError::InvalidInput("malformed blob".into()));
     }
     Ok(l)
 }

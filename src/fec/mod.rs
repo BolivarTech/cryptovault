@@ -198,10 +198,9 @@ impl ErrorCorrection for ConcatenatedFec {
         // (3) SR-R3b: the actual decoded length must match the pre-derived `l`
         // (defends against a Viterbi-crate length bug).
         if rs_stream.len() != l {
-            return Err(CryptoError::InvalidInput(format!(
-                "post-Viterbi RS-stream length {} disagrees with the framed length {l}",
-                rs_stream.len()
-            )));
+            // SR-R7: generic, oracle-free message — the exact framed/decoded
+            // lengths are structural detail withheld from a probing attacker.
+            return Err(CryptoError::InvalidInput("malformed blob".into()));
         }
         // (4) Undo the interleaver, then the outer Reed-Solomon code.
         self.rs.decode(&self.il.deinterleave(&rs_stream), pre_len)

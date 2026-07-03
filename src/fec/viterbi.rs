@@ -151,9 +151,9 @@ fn chunk_body_lengths(total: usize) -> Result<Vec<usize>> {
     let mut bodies = vec![FULL_CHUNK_BODY; full];
     if rem != 0 {
         if rem < MIN_CHUNK_BODY || rem % 2 != 0 {
-            return Err(CryptoError::InvalidInput(format!(
-                "Viterbi body length {total} has an invalid final chunk of {rem} bytes"
-            )));
+            // SR-R7: generic, oracle-free message — no exact lengths or
+            // Viterbi-framing detail is echoed back on the decode path.
+            return Err(CryptoError::InvalidInput("malformed blob".into()));
         }
         bodies.push(rem);
     }
@@ -196,12 +196,15 @@ pub(crate) fn rs_len_from_body(body_len: usize) -> Result<usize> {
 /// [`CryptoError::ErrorCorrection`]. No decode error carries codec-internal
 /// detail (SR-R7).
 fn map_decode_error(e: DecodeError) -> CryptoError {
+    // SR-R7: fixed, generic messages — a structural inconsistency and an
+    // allocation failure surface only their typed variant, never any
+    // Viterbi-internal framing detail a probing attacker could exploit.
     match e {
         DecodeError::LengthMismatch | DecodeError::InputTooLong { .. } => {
-            CryptoError::InvalidInput("Viterbi coded body is structurally inconsistent".into())
+            CryptoError::InvalidInput("malformed blob".into())
         }
         DecodeError::AllocationFailed => {
-            CryptoError::ErrorCorrection("Viterbi decode allocation failed".into())
+            CryptoError::ErrorCorrection("forward error correction failed".into())
         }
     }
 }
