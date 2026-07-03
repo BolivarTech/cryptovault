@@ -34,6 +34,11 @@ use cryptovault::{BLOB_VERSION, MAX_B64_LEN, SALT_LEN};
 /// SC-5.
 const MASTER: [u8; 32] = [0x5Au8; 32];
 
+/// A fixed per-context salt bound as AAD by the public `wrap_key`/`unwrap_key`
+/// (SR-C5). The same value is supplied on both sides, so a round-trip authenticates
+/// and a wrong key/salt still fails the AEAD tag.
+const SALT: [u8; SALT_LEN] = [0xA5u8; SALT_LEN];
+
 /// Flips `count` consecutive bytes of the base64-decoded blob starting at
 /// `start`, then re-encodes — a contiguous channel burst on the wire.
 ///
@@ -61,8 +66,8 @@ fn test_sc_1_clean_channel_roundtrip_recovers_exact_payload() {
     // Sizes straddle the RS 223/255 chunk boundaries (222/223/224, 446/447).
     for &len in &[0usize, 1, 32, 222, 223, 224, 446, 447, 1024] {
         let pt: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
-        let blob = v.wrap_key(&MASTER, &pt).unwrap();
-        let recovered = v.unwrap_key(&MASTER, &blob).unwrap();
+        let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
+        let recovered = v.unwrap_key(&MASTER, &SALT, &blob).unwrap();
         assert_eq!(&*recovered, &pt, "clean round-trip exact at len={len}");
     }
 }
@@ -75,8 +80,8 @@ fn test_sc_1_clean_channel_roundtrip_recovers_exact_payload() {
 fn test_sc_1_clean_channel_roundtrip_max_plaintext_len() {
     let v = CryptoVault::default();
     let pt = vec![0xA5u8; cryptovault::MAX_PLAINTEXT_LEN];
-    let blob = v.wrap_key(&MASTER, &pt).unwrap();
-    let recovered = v.unwrap_key(&MASTER, &blob).unwrap();
+    let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
+    let recovered = v.unwrap_key(&MASTER, &SALT, &blob).unwrap();
     assert_eq!(&*recovered, &pt, "10 MiB round-trip is exact");
 }
 
@@ -94,13 +99,13 @@ fn test_sc_2_noisy_channel_within_capacity_recovers_exact_payload() {
     // (≤16 symbols/codeword) after Viterbi + the block interleaver.
     for &len in &[32usize, 64, 200] {
         let pt: Vec<u8> = (0..len).map(|i| (i * 13 + 1) as u8).collect();
-        let blob = v.wrap_key(&MASTER, &pt).unwrap();
+        let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
         let raw_len = STANDARD.decode(&blob).unwrap().len();
         let mid = raw_len / 3;
         for &burst in &[1usize, 16] {
             let corrupted = corrupt_burst(&blob, mid, burst);
             let recovered = v
-                .unwrap_key(&MASTER, &corrupted)
+                .unwrap_key(&MASTER, &SALT, &corrupted)
                 .unwrap_or_else(|e| panic!("len={len} burst={burst} must recover, got {e:?}"));
             assert_eq!(
                 &*recovered, &pt,
@@ -120,14 +125,14 @@ fn test_sc_2_noisy_channel_within_capacity_recovers_exact_payload() {
 fn test_sc_3_corruption_beyond_capacity_is_typed_error_never_wrong_plaintext() {
     let v = CryptoVault::default();
     let pt: Vec<u8> = (0..64u8).collect();
-    let blob = v.wrap_key(&MASTER, &pt).unwrap();
+    let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
     let raw_len = STANDARD.decode(&blob).unwrap().len();
 
     // A large contiguous burst (well past the ~24-symbol single-codeword limit)
     // and a near-total wipe both must fail loud, never mis-decode.
     for &burst in &[64usize, raw_len] {
         let corrupted = corrupt_burst(&blob, raw_len / 4, burst);
-        match v.unwrap_key(&MASTER, &corrupted) {
+        match v.unwrap_key(&MASTER, &SALT, &corrupted) {
             Err(CryptoError::ErrorCorrection(_))
             | Err(CryptoError::Cipher(_))
             | Err(CryptoError::InvalidInput(_)) => {}
@@ -156,7 +161,7 @@ fn test_sc_4_tampered_header_fails_authentication() {
     let pt: Vec<u8> = (0..48u8).collect();
 
     // Recover the genuine (version, plaintext_len, body) of a real blob.
-    let blob = v.wrap_key(&MASTER, &pt).unwrap();
+    let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
     let raw = STANDARD.decode(&blob).unwrap();
     let (version, plaintext_len, body) = decode_blob(&fec, &raw).unwrap();
     assert_eq!(version, BLOB_VERSION);
@@ -167,7 +172,10 @@ fn test_sc_4_tampered_header_fails_authentication() {
     let tampered_len = encode_blob(&fec, BLOB_VERSION, plaintext_len - 1, &body);
     let b64_len = STANDARD.encode(&tampered_len);
     assert!(
-        matches!(v.unwrap_key(&MASTER, &b64_len), Err(CryptoError::Cipher(_))),
+        matches!(
+            v.unwrap_key(&MASTER, &SALT, &b64_len),
+            Err(CryptoError::Cipher(_))
+        ),
         "tampered plaintext_len must fail the AEAD tag"
     );
 
@@ -176,7 +184,7 @@ fn test_sc_4_tampered_header_fails_authentication() {
     let b64_ver = STANDARD.encode(&tampered_ver);
     assert!(
         matches!(
-            v.unwrap_key(&MASTER, &b64_ver),
+            v.unwrap_key(&MASTER, &SALT, &b64_ver),
             Err(CryptoError::InvalidInput(_))
         ),
         "tampered version must be rejected as InvalidInput"
@@ -196,10 +204,10 @@ fn test_sc_5_wrong_kek_salt_or_password_reveals_no_key_material() {
     let dek: Vec<u8> = (0..=255u16).map(|b| b as u8).collect();
 
     // Wrong KEK.
-    let wrapped = v.wrap_key(&[1u8; 32], &dek).unwrap();
+    let wrapped = v.wrap_key(&[1u8; 32], &SALT, &dek).unwrap();
     assert!(
         matches!(
-            v.unwrap_key(&[2u8; 32], &wrapped),
+            v.unwrap_key(&[2u8; 32], &SALT, &wrapped),
             Err(CryptoError::Cipher(_))
         ),
         "wrong KEK → Cipher error, no key material"
@@ -208,10 +216,10 @@ fn test_sc_5_wrong_kek_salt_or_password_reveals_no_key_material() {
     // Wrong salt: a different salt derives a different master → wrong KEK.
     let m_salt_a = v.derive_key("correct horse", &[7u8; SALT_LEN]).unwrap();
     let m_salt_b = v.derive_key("correct horse", &[8u8; SALT_LEN]).unwrap();
-    let wrapped_salt = v.wrap_key(&m_salt_a, &dek).unwrap();
+    let wrapped_salt = v.wrap_key(&m_salt_a, &SALT, &dek).unwrap();
     assert!(
         matches!(
-            v.unwrap_key(&m_salt_b, &wrapped_salt),
+            v.unwrap_key(&m_salt_b, &SALT, &wrapped_salt),
             Err(CryptoError::Cipher(_))
         ),
         "wrong salt → different master → Cipher error"
@@ -220,10 +228,10 @@ fn test_sc_5_wrong_kek_salt_or_password_reveals_no_key_material() {
     // Wrong password: a different passphrase derives a different master.
     let m_pw_a = v.derive_key("passphrase one", &[9u8; SALT_LEN]).unwrap();
     let m_pw_b = v.derive_key("passphrase two", &[9u8; SALT_LEN]).unwrap();
-    let wrapped_pw = v.wrap_key(&m_pw_a, &dek).unwrap();
+    let wrapped_pw = v.wrap_key(&m_pw_a, &SALT, &dek).unwrap();
     assert!(
         matches!(
-            v.unwrap_key(&m_pw_b, &wrapped_pw),
+            v.unwrap_key(&m_pw_b, &SALT, &wrapped_pw),
             Err(CryptoError::Cipher(_))
         ),
         "wrong password → different master → Cipher error"
@@ -252,7 +260,7 @@ fn test_sc_6_adversarial_blob_is_typed_error_without_panic() {
     let fec = ConcatenatedFec::default();
 
     // A genuine blob to derive truncated / bad-version variants from.
-    let good = v.wrap_key(&MASTER, b"a small secret").unwrap();
+    let good = v.wrap_key(&MASTER, &SALT, b"a small secret").unwrap();
 
     // Each entry: (label, input). Every one must return a typed error, no panic.
     let bad_version = {
@@ -277,7 +285,7 @@ fn test_sc_6_adversarial_blob_is_typed_error_without_panic() {
     ];
 
     for (label, input) in cases {
-        match v.unwrap_key(&MASTER, input) {
+        match v.unwrap_key(&MASTER, &SALT, input) {
             Err(
                 CryptoError::InvalidInput(_)
                 | CryptoError::Encoding(_)
@@ -301,29 +309,29 @@ fn test_sc_6_adversarial_blob_is_typed_error_without_panic() {
 fn test_sc_7_rewrap_rebinds_context_old_no_longer_unwraps() {
     let v = CryptoVault::default();
     let (old_kek, new_kek) = ([1u8; 32], [9u8; 32]);
-    // `wrap_key` binds an empty salt as AAD, so the old context's salt is `&[]`.
-    let old_salt: &[u8] = &[];
+    // `wrap_key` binds the supplied per-context salt as AAD (SR-C5).
+    let old_salt: &[u8] = &[11u8; SALT_LEN];
     let new_salt: &[u8] = &[42u8; SALT_LEN];
     let dek: Vec<u8> = (0..96u8).collect();
 
-    let wrapped = v.wrap_key(&old_kek, &dek).unwrap();
+    let wrapped = v.wrap_key(&old_kek, old_salt, &dek).unwrap();
     let rewrapped = v
         .rewrap(&old_kek, old_salt, &new_kek, new_salt, &wrapped)
         .unwrap();
 
     // The NEW context recovers the exact DEK — proven by rewrapping back to the
-    // (old_kek, empty) context and unwrapping through the public door.
+    // (old_kek, old_salt) context and unwrapping through the public door.
     let back = v
         .rewrap(&new_kek, new_salt, &old_kek, old_salt, &rewrapped)
         .unwrap();
-    let recovered = v.unwrap_key(&old_kek, &back).unwrap();
+    let recovered = v.unwrap_key(&old_kek, old_salt, &back).unwrap();
     assert_eq!(&*recovered, &dek, "rewrap preserves the DEK end-to-end");
 
-    // The OLD context (old_kek, empty salt) no longer unwraps the rewrapped blob
+    // The OLD context (old_kek, old_salt) no longer unwraps the rewrapped blob
     // (it is bound to new_kek + new_salt).
     assert!(
         matches!(
-            v.unwrap_key(&old_kek, &rewrapped),
+            v.unwrap_key(&old_kek, old_salt, &rewrapped),
             Err(CryptoError::Cipher(_))
         ),
         "old context must no longer unwrap the rewrapped blob"
@@ -353,8 +361,8 @@ fn test_sc_8_empty_and_boundary_payloads_roundtrip_and_over_cap_rejected() {
     // Empty and chunk-boundary payloads round-trip exactly.
     for &len in &[0usize, 223, 446, 447] {
         let pt: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-        let blob = v.wrap_key(&MASTER, &pt).unwrap();
-        let recovered = v.unwrap_key(&MASTER, &blob).unwrap();
+        let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
+        let recovered = v.unwrap_key(&MASTER, &SALT, &blob).unwrap();
         assert_eq!(&*recovered, &pt, "boundary payload len={len} round-trips");
     }
 
@@ -362,7 +370,7 @@ fn test_sc_8_empty_and_boundary_payloads_roundtrip_and_over_cap_rejected() {
     let over_cap = "A".repeat(MAX_B64_LEN + 1);
     assert!(
         matches!(
-            v.unwrap_key(&MASTER, &over_cap),
+            v.unwrap_key(&MASTER, &SALT, &over_cap),
             Err(CryptoError::InvalidInput(_))
         ),
         "base64 over MAX_B64_LEN is rejected pre-allocation"

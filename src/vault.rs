@@ -523,18 +523,23 @@ impl CryptoVault {
         }
     }
 
-    /// Wraps raw key material (a DEK) under a key-encryption key, returning a
-    /// base64 envelope blob (SR-C5).
+    /// Wraps raw key material (a DEK) under a key-encryption key and per-context
+    /// salt, returning a base64 envelope blob (SR-C5).
     ///
     /// Runs the same AEAD-then-FEC pipeline as [`encrypt_with_key`](Self::encrypt_with_key)
-    /// but over **raw bytes** (not UTF-8) — the front door for envelope
-    /// DEK/KEK key-wrapping. Recover with [`unwrap_key`](Self::unwrap_key). The
-    /// context here is the `kek` itself; to additionally bind a per-context salt
-    /// and rotate between contexts, use [`rewrap`](Self::rewrap).
+    /// but over **raw bytes** (not UTF-8) — the front door for envelope DEK/KEK
+    /// key-wrapping. The per-context `salt` is bound as **AAD** (SR-C5), so a
+    /// wrapped DEK is cryptographically tied to its `(kek, salt)` context: it can
+    /// only be unwrapped by [`unwrap_key`](Self::unwrap_key) under the *same*
+    /// salt, and rotated between contexts with [`rewrap`](Self::rewrap) (which
+    /// binds the old and new salts). The salt is authenticated but **never
+    /// stored** in the blob — it stays caller-managed, out of band.
     ///
     /// # Parameters
     /// - `kek`: the session **master** key-encryption key from
     ///   [`derive_key`](Self::derive_key) (HKDF-expanded internally).
+    /// - `salt`: the per-context salt bound as AAD (typically the same salt used
+    ///   to derive `kek`; pass `&[]` for no salt binding).
     /// - `key_material`: the raw DEK bytes to wrap (`≤ `[`crate::MAX_PLAINTEXT_LEN`]).
     ///
     /// # Returns
@@ -544,16 +549,22 @@ impl CryptoVault {
     /// [`CryptoError::InvalidInput`] if `key_material` exceeds the cap;
     /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
     /// nonce sampling or AEAD failure.
-    pub fn wrap_key(&self, kek: &[u8], key_material: &[u8]) -> Result<String> {
-        self.encrypt_bytes_aad(kek, key_material, &[])
+    pub fn wrap_key(&self, kek: &[u8], salt: &[u8], key_material: &[u8]) -> Result<String> {
+        self.encrypt_bytes_aad(kek, key_material, salt)
     }
 
     /// Unwraps a base64 envelope blob produced by [`wrap_key`](Self::wrap_key),
     /// returning the raw DEK in a [`Zeroizing`] buffer (SR-C5, SR-C8).
     ///
+    /// The `salt` is bound as AAD and MUST match the one passed to
+    /// [`wrap_key`](Self::wrap_key): a wrong `(kek, salt)` context fails the AEAD
+    /// tag and reveals no key material (SR-C5).
+    ///
     /// # Parameters
     /// - `kek`: the master KEK from [`derive_key`](Self::derive_key) — the same
     ///   one passed to [`wrap_key`](Self::wrap_key).
+    /// - `salt`: the per-context salt bound as AAD — the same one passed to
+    ///   [`wrap_key`](Self::wrap_key) (pass `&[]` if none was bound).
     /// - `wrapped`: the base64 wrapped-key blob (`≤ `[`crate::MAX_B64_LEN`]).
     ///
     /// # Returns
@@ -563,10 +574,10 @@ impl CryptoVault {
     /// [`CryptoError::InvalidInput`] on an oversized/malformed blob;
     /// [`CryptoError::Encoding`] on non-canonical base64;
     /// [`CryptoError::ErrorCorrection`] beyond FEC capacity;
-    /// [`CryptoError::Cipher`] if the AEAD tag fails (wrong KEK) — **no key
-    /// material is revealed**. **Never panics** on adversarial input.
-    pub fn unwrap_key(&self, kek: &[u8], wrapped: &str) -> Result<Zeroizing<Vec<u8>>> {
-        self.decrypt_bytes_aad(kek, wrapped, &[])
+    /// [`CryptoError::Cipher`] if the AEAD tag fails (wrong KEK or salt) — **no
+    /// key material is revealed**. **Never panics** on adversarial input.
+    pub fn unwrap_key(&self, kek: &[u8], salt: &[u8], wrapped: &str) -> Result<Zeroizing<Vec<u8>>> {
+        self.decrypt_bytes_aad(kek, wrapped, salt)
     }
 
     /// Re-wraps a salt-bound DEK from an old `(kek, salt)` context to a new one,
@@ -696,8 +707,9 @@ mod construction_tests {
 
         // Raw-byte envelope front door round-trips through a NoFec vault.
         let dek: Vec<u8> = (0..64u8).collect();
-        let wrapped = vault.wrap_key(&master, &dek).unwrap();
-        let unwrapped = vault.unwrap_key(&master, &wrapped).unwrap();
+        let salt = [0x11u8; SALT_LEN];
+        let wrapped = vault.wrap_key(&master, &salt, &dek).unwrap();
+        let unwrapped = vault.unwrap_key(&master, &salt, &wrapped).unwrap();
         assert_eq!(&*unwrapped, &dek, "NoFec raw-byte round-trip");
     }
 
@@ -824,9 +836,10 @@ mod envelope_tests {
     fn test_sc7_wrap_unwrap_raw_bytes_roundtrip() {
         let v = CryptoVault::default();
         let kek = [4u8; KEY_LEN];
+        let salt = [7u8; SALT_LEN];
         let dek: Vec<u8> = (0..=255u16).map(|b| b as u8).collect();
-        let wrapped = v.wrap_key(&kek, &dek).unwrap();
-        let unwrapped = v.unwrap_key(&kek, &wrapped).unwrap();
+        let wrapped = v.wrap_key(&kek, &salt, &dek).unwrap();
+        let unwrapped = v.unwrap_key(&kek, &salt, &wrapped).unwrap();
         assert_eq!(&*unwrapped, &dek, "raw byte round-trip is exact");
     }
 
@@ -835,8 +848,9 @@ mod envelope_tests {
     fn test_sc7_wrap_unwrap_empty_material() {
         let v = CryptoVault::default();
         let kek = [6u8; KEY_LEN];
-        let wrapped = v.wrap_key(&kek, b"").unwrap();
-        assert!(v.unwrap_key(&kek, &wrapped).unwrap().is_empty());
+        let salt = [5u8; SALT_LEN];
+        let wrapped = v.wrap_key(&kek, &salt, b"").unwrap();
+        assert!(v.unwrap_key(&kek, &salt, &wrapped).unwrap().is_empty());
     }
 
     /// SC-5: unwrapping under the wrong KEK fails the AEAD tag with a typed
@@ -844,9 +858,10 @@ mod envelope_tests {
     #[test]
     fn test_sc5_unwrap_wrong_kek_is_cipher_error() {
         let v = CryptoVault::default();
-        let wrapped = v.wrap_key(&[1u8; KEY_LEN], b"a dek").unwrap();
+        let salt = [3u8; SALT_LEN];
+        let wrapped = v.wrap_key(&[1u8; KEY_LEN], &salt, b"a dek").unwrap();
         assert!(matches!(
-            v.unwrap_key(&[2u8; KEY_LEN], &wrapped),
+            v.unwrap_key(&[2u8; KEY_LEN], &salt, &wrapped),
             Err(CryptoError::Cipher(_))
         ));
     }
@@ -871,7 +886,10 @@ mod envelope_tests {
             .unwrap();
         // The NEW context recovers the exact DEK through the public unwrap.
         let recovered = v.unwrap_key(&new_kek, &new_salt, &rewrapped).unwrap();
-        assert_eq!(&*recovered, &dek, "public wrap→rewrap→unwrap recovers the DEK");
+        assert_eq!(
+            &*recovered, &dek,
+            "public wrap→rewrap→unwrap recovers the DEK"
+        );
         // The OLD context no longer unwraps the rewrapped blob.
         assert!(
             matches!(
@@ -892,23 +910,22 @@ mod envelope_tests {
         let (old_salt, new_salt) = ([2u8; SALT_LEN], [3u8; SALT_LEN]);
         let dek: Vec<u8> = (0..64u8).collect();
 
-        // Initial blob bound to the OLD context (kek + salt as AAD).
-        let wrapped = v.encrypt_bytes_aad(&old_kek, &dek, &old_salt).unwrap();
+        // Initial blob bound to the OLD context via the PUBLIC wrap (kek + salt
+        // as AAD).
+        let wrapped = v.wrap_key(&old_kek, &old_salt, &dek).unwrap();
 
         // Re-tie old → new context.
         let rewrapped = v
             .rewrap(&old_kek, &old_salt, &new_kek, &new_salt, &wrapped)
             .unwrap();
 
-        // New context recovers the exact DEK.
-        let recovered = v
-            .decrypt_bytes_aad(&new_kek, &rewrapped, &new_salt)
-            .unwrap();
+        // New context recovers the exact DEK through the public unwrap.
+        let recovered = v.unwrap_key(&new_kek, &new_salt, &rewrapped).unwrap();
         assert_eq!(&*recovered, &dek, "rewrap preserves the DEK");
 
         // Old context (old kek + old salt) no longer unwraps the rewrapped blob.
         assert!(matches!(
-            v.decrypt_bytes_aad(&old_kek, &rewrapped, &old_salt),
+            v.unwrap_key(&old_kek, &old_salt, &rewrapped),
             Err(CryptoError::Cipher(_))
         ));
     }
@@ -920,7 +937,7 @@ mod envelope_tests {
         let v = CryptoVault::default();
         let (old_kek, new_kek) = ([1u8; KEY_LEN], [9u8; KEY_LEN]);
         let (old_salt, new_salt) = ([2u8; SALT_LEN], [3u8; SALT_LEN]);
-        let wrapped = v.encrypt_bytes_aad(&old_kek, b"dek", &old_salt).unwrap();
+        let wrapped = v.wrap_key(&old_kek, &old_salt, b"dek").unwrap();
         assert!(matches!(
             v.rewrap(&old_kek, &[0u8; SALT_LEN], &new_kek, &new_salt, &wrapped),
             Err(CryptoError::Cipher(_))

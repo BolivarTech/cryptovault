@@ -19,9 +19,13 @@ use cryptovault::vault::CryptoVault;
 /// simply fails the AEAD tag with a typed error).
 const KEK: [u8; 32] = [0x42u8; 32];
 
+/// Fixed per-context salt bound as AAD — like the KEK, irrelevant to the
+/// no-panic contract (a mismatched salt simply fails the AEAD tag).
+const SALT: [u8; 16] = [0x24u8; 16];
+
 fuzz_target!(|data: &[u8]| {
     let vault = CryptoVault::default();
     let wrapped = String::from_utf8_lossy(data);
     // Contract: returns Ok/Err, never panics.
-    let _ = vault.unwrap_key(&KEK, &wrapped);
+    let _ = vault.unwrap_key(&KEK, &SALT, &wrapped);
 });

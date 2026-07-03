@@ -57,8 +57,8 @@ proptest! {
         key in proptest::array::uniform32(any::<u8>()),
     ) {
         let v = CryptoVault::default();
-        let blob = v.wrap_key(&key, &pt).unwrap();
-        let recovered = v.unwrap_key(&key, &blob).unwrap();
+        let blob = v.wrap_key(&key, &[], &pt).unwrap();
+        let recovered = v.unwrap_key(&key, &[], &blob).unwrap();
         prop_assert_eq!(&*recovered, &pt[..]);
     }
 
@@ -72,7 +72,7 @@ proptest! {
     ) {
         let v = CryptoVault::default();
         // Must RETURN (Ok or Err), never panic.
-        let _ = v.unwrap_key(&key, &STANDARD.encode(&bytes));
+        let _ = v.unwrap_key(&key, &[], &STANDARD.encode(&bytes));
     }
 
     /// SC-5 / SR-R6: with `k1 != k2`, decrypting under `k2` is **always** `Err` —
@@ -85,8 +85,8 @@ proptest! {
     ) {
         prop_assume!(k1 != k2);
         let v = CryptoVault::default();
-        let blob = v.wrap_key(&k1, &pt).unwrap();
-        match v.unwrap_key(&k2, &blob) {
+        let blob = v.wrap_key(&k1, &[], &pt).unwrap();
+        match v.unwrap_key(&k2, &[], &blob) {
             Ok(wrong) => prop_assert!(false, "wrong key decrypted to {} bytes", wrong.len()),
             Err(CryptoError::Cipher(_)) => {}
             Err(other) => prop_assert!(
@@ -108,7 +108,7 @@ proptest! {
         offset_frac in 0.1f64..0.8,
     ) {
         let v = CryptoVault::default();
-        let blob = v.wrap_key(&key, &pt).unwrap();
+        let blob = v.wrap_key(&key, &[], &pt).unwrap();
         let mut raw = STANDARD.decode(&blob).unwrap();
         let start = ((raw.len() as f64) * offset_frac) as usize;
         let end = (start + burst).min(raw.len());
@@ -116,7 +116,7 @@ proptest! {
             *b ^= 0xFF;
         }
         let corrupted = STANDARD.encode(&raw);
-        let recovered = v.unwrap_key(&key, &corrupted).unwrap();
+        let recovered = v.unwrap_key(&key, &[], &corrupted).unwrap();
         prop_assert_eq!(&*recovered, &pt[..]);
     }
 }

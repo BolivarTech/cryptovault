@@ -38,7 +38,7 @@ fn test_sr_r6_aead_backstop_never_returns_wrong_plaintext() {
     let master = [0x24u8; KEY_LEN];
     // A multi-codeword payload so the corruption spans real RS/Viterbi structure.
     let original: Vec<u8> = (0..600u32).map(|i| (i * 7 + 3) as u8).collect();
-    let blob = vault.wrap_key(&master, &original).unwrap();
+    let blob = vault.wrap_key(&master, &[], &original).unwrap();
     let raw = STANDARD.decode(&blob).unwrap();
 
     // Several corruption offsets across the blob, each obliterating a contiguous
@@ -57,7 +57,7 @@ fn test_sr_r6_aead_backstop_never_returns_wrong_plaintext() {
             for b in corrupted.iter_mut().take(end).skip(off) {
                 *b ^= 0xFF;
             }
-            let result = vault.unwrap_key(&master, &STANDARD.encode(&corrupted));
+            let result = vault.unwrap_key(&master, &[], &STANDARD.encode(&corrupted));
             match result {
                 // The ONLY acceptable Ok is the exact original — which can happen
                 // only if the corruption landed within FEC capacity. A differing
@@ -86,13 +86,13 @@ fn test_sr_r6_whole_blob_corruption_is_typed_error() {
     let vault = CryptoVault::default();
     let master = [0x9Au8; KEY_LEN];
     let original: Vec<u8> = (0..300u32).map(|i| i as u8).collect();
-    let blob = vault.wrap_key(&master, &original).unwrap();
+    let blob = vault.wrap_key(&master, &[], &original).unwrap();
     let mut raw = STANDARD.decode(&blob).unwrap();
     // Flip every byte — nothing survives.
     for b in raw.iter_mut() {
         *b ^= 0xFF;
     }
-    let result = vault.unwrap_key(&master, &STANDARD.encode(&raw));
+    let result = vault.unwrap_key(&master, &[], &STANDARD.encode(&raw));
     assert!(
         matches!(
             result,
@@ -143,8 +143,10 @@ fn test_sr_c8_secret_returns_are_zeroizing() {
     require_zeroizing_vec(generate_dek().unwrap());
 
     // unwrap_key → Zeroizing<Vec<u8>>
-    let wrapped = vault.wrap_key(&master, b"a data encryption key").unwrap();
-    require_zeroizing_vec(vault.unwrap_key(&master, &wrapped).unwrap());
+    let wrapped = vault
+        .wrap_key(&master, &[], b"a data encryption key")
+        .unwrap();
+    require_zeroizing_vec(vault.unwrap_key(&master, &[], &wrapped).unwrap());
 
     // decrypt_with_key → Zeroizing<String>
     let blob = vault.encrypt_with_key(&master, "small message").unwrap();
@@ -174,13 +176,13 @@ fn test_sr_c5_wrong_kek_never_unwraps_dek() {
     let kek_b = [0x22u8; KEY_LEN];
     let dek: Vec<u8> = (0..64u8).collect();
 
-    let wrapped = vault.wrap_key(&kek_a, &dek).unwrap();
+    let wrapped = vault.wrap_key(&kek_a, &[], &dek).unwrap();
 
     // Correct KEK recovers the DEK exactly.
-    assert_eq!(&*vault.unwrap_key(&kek_a, &wrapped).unwrap(), &dek[..]);
+    assert_eq!(&*vault.unwrap_key(&kek_a, &[], &wrapped).unwrap(), &dek[..]);
 
     // Wrong KEK is a typed Cipher error, never the DEK.
-    match vault.unwrap_key(&kek_b, &wrapped) {
+    match vault.unwrap_key(&kek_b, &[], &wrapped) {
         Ok(_) => panic!("a wrong KEK must NOT unwrap the DEK"),
         Err(CryptoError::Cipher(_)) => {}
         Err(other) => panic!("wrong KEK: expected Cipher, got {other:?}"),
@@ -204,7 +206,7 @@ fn test_sr_c5_wrong_salt_context_never_unwraps_dek() {
 
     // Bind the DEK into the (kek1, salt1) context via rewrap from a plain wrap
     // (whose bound salt is the empty AAD).
-    let wrapped0 = vault.wrap_key(&kek0, &dek).unwrap();
+    let wrapped0 = vault.wrap_key(&kek0, &[], &dek).unwrap();
     let bound = vault.rewrap(&kek0, &[], &kek1, &salt1, &wrapped0).unwrap();
 
     // Correct (kek1, salt1) re-wraps successfully.

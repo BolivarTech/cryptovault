@@ -174,7 +174,7 @@ fn small_corpus() -> Vec<Case> {
 fn test_sr_r5_small_adversarial_corpus_is_typed_error_no_panic() {
     let vault = CryptoVault::default();
     for case in small_corpus() {
-        match vault.unwrap_key(&MASTER, &case.input) {
+        match vault.unwrap_key(&MASTER, &[], &case.input) {
             Ok(_) => panic!(
                 "adversarial case '{}' unexpectedly returned Ok (input len {})",
                 case.name,
@@ -203,7 +203,7 @@ fn test_sr_r4_oversized_base64_string_rejected_pre_allocation() {
     let giant = "A".repeat(MAX_B64_LEN + 1);
     assert!(
         matches!(
-            vault.unwrap_key(&MASTER, &giant),
+            vault.unwrap_key(&MASTER, &[], &giant),
             Err(CryptoError::InvalidInput(_))
         ),
         "an over-cap base64 string must be rejected pre-allocation with InvalidInput"
@@ -219,7 +219,7 @@ fn test_sr_r4_oversized_decoded_blob_rejected() {
     let oversized = STANDARD.encode(vec![0u8; MAX_BLOB_LEN + 1000]);
     assert!(
         matches!(
-            vault.unwrap_key(&MASTER, &oversized),
+            vault.unwrap_key(&MASTER, &[], &oversized),
             Err(CryptoError::InvalidInput(_))
         ),
         "a decoded blob past MAX_BLOB_LEN must be rejected with InvalidInput"
@@ -234,7 +234,7 @@ fn test_sr_r4_off_by_one_over_max_blob_len_rejected() {
     let off_by_one = STANDARD.encode(vec![0u8; MAX_BLOB_LEN + 1]);
     assert!(
         matches!(
-            vault.unwrap_key(&MASTER, &off_by_one),
+            vault.unwrap_key(&MASTER, &[], &off_by_one),
             Err(CryptoError::InvalidInput(_))
         ),
         "a decoded blob of MAX_BLOB_LEN + 1 bytes must be rejected with InvalidInput"
