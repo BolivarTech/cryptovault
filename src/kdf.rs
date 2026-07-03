@@ -10,10 +10,18 @@
 //! AEAD key. All secret material is returned in [`Zeroizing`] buffers.
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use hkdf::Hkdf;
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoError, Result};
 use crate::KEY_LEN;
+
+/// HKDF-SHA256 `info` label for the AEAD sub-key (SR-C3 domain separation).
+const HKDF_INFO_AEAD: &[u8] = b"cryptovault:v1:aead";
+
+/// HKDF-SHA256 `info` label for the interleaver-seed sub-key (SR-C3).
+const HKDF_INFO_INTERLEAVER: &[u8] = b"cryptovault:v1:interleaver";
 
 /// Strategy trait for deriving the 32-byte master secret from a passphrase and
 /// a per-context salt (SR-C2).
@@ -83,6 +91,58 @@ impl KeyDerivation for Argon2Kdf {
             .map_err(|e| CryptoError::KeyDerivation(format!("Argon2id derivation failed: {e}")))?;
         Ok(master)
     }
+}
+
+/// Expand the master secret into the 32-byte AES-256-GCM-SIV AEAD key
+/// (SR-C3), using HKDF-SHA256 with `info = "cryptovault:v1:aead"`.
+///
+/// # Parameters
+/// - `master`: the Argon2id master secret (see [`Argon2Kdf::derive_master`]).
+///
+/// # Returns
+/// A [`Zeroizing`]-wrapped [`crate::KEY_LEN`]-byte AEAD key, distinct from the
+/// raw master and from the interleaver seed (domain separation).
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] if the HKDF expand step fails (unreachable
+/// for a [`crate::KEY_LEN`]-byte output, which is far below HKDF's `255 × 32`
+/// limit).
+pub fn expand_aead_key(master: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    hkdf_expand(master, HKDF_INFO_AEAD)
+}
+
+/// Expand the master secret into the 32-byte interleaver seed (SR-C3), using
+/// HKDF-SHA256 with `info = "cryptovault:v1:interleaver"`.
+///
+/// This seed feeds **only** the optional CSPRNG interleaver layer; the default
+/// deterministic block interleaver uses no key material. It is never the raw
+/// AEAD key (distinct `info` label).
+///
+/// # Parameters
+/// - `master`: the Argon2id master secret (see [`Argon2Kdf::derive_master`]).
+///
+/// # Returns
+/// A [`Zeroizing`]-wrapped [`crate::KEY_LEN`]-byte interleaver seed.
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] if the HKDF expand step fails (unreachable for
+/// a [`crate::KEY_LEN`]-byte output).
+pub fn expand_interleaver_seed(master: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    hkdf_expand(master, HKDF_INFO_INTERLEAVER)
+}
+
+/// Shared HKDF-SHA256 expansion (DRY): derive one [`crate::KEY_LEN`]-byte
+/// sub-key from `master` under the given `info` label.
+///
+/// # Errors
+/// [`CryptoError::KeyDerivation`] if [`Hkdf::expand`] rejects the output length
+/// (statically below the `255 × HashLen` HKDF cap, so unreachable here).
+fn hkdf_expand(master: &[u8], info: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let hk = Hkdf::<Sha256>::new(None, master);
+    let mut out = Zeroizing::new(vec![0u8; KEY_LEN]);
+    hk.expand(info, &mut out)
+        .map_err(|e| CryptoError::KeyDerivation(format!("HKDF-SHA256 expand failed: {e}")))?;
+    Ok(out)
 }
 
 #[cfg(test)]
