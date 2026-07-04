@@ -498,9 +498,12 @@ impl CryptoVault {
         }
         // (2) Strict base64 decode — the STANDARD engine rejects a bad alphabet,
         // non-canonical padding, and trailing bits.
+        // SR-R7: map to a fixed, generic message — the base64 crate's error
+        // interpolates the offending byte value / offset, a structural oracle the
+        // decode path MUST NOT echo back to a probing caller.
         let decoded = STANDARD
             .decode(b64)
-            .map_err(|e| CryptoError::Encoding(format!("base64 decode failed: {e}")))?;
+            .map_err(|_| CryptoError::Encoding("invalid encoding".into()))?;
         // (2b) M3: enforce the per-vault accept cap on the decoded blob BEFORE the
         // FEC decode, so an untrusted caller cannot force worst-case FEC-decode CPU
         // beyond this vault's configured bound (default MAX_BLOB_LEN).
