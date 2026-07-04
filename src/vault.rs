@@ -592,6 +592,19 @@ impl CryptoVault {
     /// Runs the byte core, then validates that the recovered plaintext is valid
     /// UTF-8; invalid UTF-8 is rejected rather than lossily decoded.
     ///
+    /// # ⚠️ Pre-authentication CPU cost (DoS surface)
+    ///
+    /// The **full FEC decode runs before the AEAD tag check**, so a hostile,
+    /// structurally-valid junk blob (no valid key/tag) still forces the entire
+    /// decode. Cost scales with blob size: **≈ 1.1 s at 128 KiB, ≈ 9 s at 1 MiB,
+    /// ≈ 105 s at the 10 MiB cap** (single thread) — a ~24 MB max blob costs ~100 s
+    /// of pre-authentication CPU. A service decrypting untrusted input **SHOULD
+    /// rate-limit** and construct the vault with
+    /// [`with_max_blob_len`](Self::with_max_blob_len) to bound worst-case decode
+    /// latency below the 10 MiB absolute. See the crate-level operational
+    /// constraints, the `# ⚠️ Memory` note above, and the
+    /// [`derive_key`](Self::derive_key) DoS note.
+    ///
     /// # Parameters
     /// - `key`: the session master from [`derive_key`](Self::derive_key).
     /// - `blob`: the base64 blob (`≤ `[`crate::MAX_B64_LEN`] characters).
@@ -654,6 +667,16 @@ impl CryptoVault {
     /// The `salt` is bound as AAD and MUST match the one passed to
     /// [`wrap_key`](Self::wrap_key): a wrong `(kek, salt)` context fails the AEAD
     /// tag and reveals no key material (SR-C5).
+    ///
+    /// # ⚠️ Pre-authentication CPU cost (DoS surface)
+    ///
+    /// Like [`decrypt_with_key`](Self::decrypt_with_key), the **full FEC decode
+    /// runs before the AEAD tag check**, so a hostile structurally-valid blob
+    /// forces the entire decode regardless of key validity (**≈ 105 s at the
+    /// 10 MiB cap**, single thread). A service unwrapping untrusted input **SHOULD
+    /// rate-limit** and cap the accepted blob size via
+    /// [`with_max_blob_len`](Self::with_max_blob_len). See the crate-level
+    /// operational constraints and the `# ⚠️ Memory` note on [`CryptoVault`].
     ///
     /// # Parameters
     /// - `kek`: the master KEK from [`derive_key`](Self::derive_key) — the same

@@ -154,6 +154,12 @@ impl BlockInterleaver {
 
     /// De-interleaves `stream`, undoing [`interleave`](Self::interleave).
     ///
+    /// # ⚠️ No self-enforced length cap (N4)
+    /// This direct method does **not** enforce [`crate::MAX_BLOB_LEN`]; the cap is
+    /// applied by the vault decrypt path before de-interleave. A caller invoking
+    /// the interleaver directly, bypassing the vault, **must impose its own
+    /// input-length cap** to bound allocation.
+    ///
     /// # Parameters
     /// - `stream`: a previously interleaved stream.
     ///
@@ -337,6 +343,11 @@ impl Interleaver {
     ///
     /// The CSPRNG layer is undone first (it is applied last on encode), then the
     /// block interleaver.
+    ///
+    /// # ⚠️ No self-enforced length cap (N4)
+    /// This direct method does **not** enforce [`crate::MAX_BLOB_LEN`]; the vault
+    /// decrypt path applies the cap before de-interleave. A caller bypassing the
+    /// vault **must impose its own input-length cap** to bound allocation.
     #[must_use]
     pub fn deinterleave(&self, stream: &[u8]) -> Vec<u8> {
         match self {

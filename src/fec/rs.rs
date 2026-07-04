@@ -45,6 +45,15 @@ impl ErrorCorrection for ReedSolomonCodec {
             .expect("RS encode of an in-memory buffer cannot overflow usize")
     }
 
+    /// Reed-Solomon-decodes `encoded`, correcting up to 16 symbol errors per
+    /// codeword and truncating to `pre_len`.
+    ///
+    /// # ⚠️ No self-enforced length cap (N4)
+    /// This direct method validates only whole-codeword framing; it does **not**
+    /// enforce [`MAX_BLOB_LEN`] (that cap lives in
+    /// [`validate_pre_fec`](Self::validate_pre_fec) and the vault decrypt path). A
+    /// caller using this codec directly, bypassing the vault, **must impose its own
+    /// input-length cap** to bound decode CPU/memory.
     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
         // SR-F1 / SR-R3: an RS stream is a whole number of `RS_BLOCK`-byte
         // codewords. Reject a structurally invalid length up front so the FEC

@@ -59,6 +59,26 @@
 //! (a semaphore or worker pool) or risk out-of-memory — concurrency policy is
 //! deliberately a caller/service-layer concern.
 //!
+//! ### Decrypt-path CPU cost — rate-limit untrusted callers
+//!
+//! Decryption is not just memory-heavy (above) but **CPU-heavy, and the cost is
+//! paid *before* authentication**. The full FEC decode (Viterbi → de-interleave →
+//! Reed-Solomon) runs on the raw received bytes **before** the AEAD tag is
+//! checked, so a hostile, structurally-valid junk blob — no valid key or tag —
+//! still forces the entire decode. Measured single-thread cost scales with blob
+//! size: **≈ 1.1 s at 128 KiB, ≈ 9 s at 1 MiB, ≈ 105 s at the 10 MiB cap** (a
+//! single ~24 MB max blob ⇒ ~100 s of pre-authentication CPU, ~4000:1
+//! amplification over the attacker's send cost).
+//!
+//! This is a denial-of-service surface for any service that decrypts untrusted
+//! input. **Callers SHOULD rate-limit decrypts** and, to bound worst-case decode
+//! latency below the 10 MiB absolute, **construct the vault with
+//! [`vault::CryptoVault::with_max_blob_len`]** to cap the accepted blob size at a
+//! value matched to their channel (e.g. [`RECOMMENDED_MAX_PAYLOAD`]). This is the
+//! decrypt-path analogue of the [`derive_key`](vault::CryptoVault::derive_key)
+//! memory-hard DoS note below and the `# ⚠️ Memory` note on
+//! [`vault::CryptoVault`].
+//!
 //! ### Nonce birthday bound — rekey long-lived keys
 //!
 //! Each record draws a fresh 12-byte `OsRng` nonce. The birthday bound is
@@ -94,7 +114,9 @@
 //! (availability) only** — it **never** affects AEAD confidentiality or integrity.
 //! The interleaver is obfuscation, not security.
 //!
-//! See `sbtdd/spec-behavior.md` for the full specification.
+//! See the shipped `docs/` directory (e.g. `docs/ber-analysis.md`,
+//! `docs/no-panic.md`, `docs/unsafe-audit.md`) for the design and analysis
+//! documentation.
 //!
 //! # Examples
 //!

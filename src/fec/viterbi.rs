@@ -101,6 +101,12 @@ impl ViterbiCodec {
     /// tag is the final integrity anchor); this stage errors only on a
     /// structurally malformed body or a backing-codec boundary failure.
     ///
+    /// # ⚠️ No self-enforced length cap (N4)
+    /// This direct method does **not** enforce [`crate::MAX_BLOB_LEN`] — that cap
+    /// is applied by the vault decrypt path (and each codec's `validate_pre_fec`)
+    /// *before* decode. A caller invoking this codec directly, bypassing the vault,
+    /// **must impose its own input-length cap** to bound decode CPU/memory.
+    ///
     /// # Parameters
     /// - `blob_body`: the received, possibly-corrupted coded stream.
     ///

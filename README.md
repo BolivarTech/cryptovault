@@ -167,8 +167,9 @@ assert_eq!(&*unwrapped, &*dek);
 - **Known-Answer Tests** against independent references — RFC 8452 (AES-GCM-SIV),
   RFC 9106 (Argon2id), RFC 5869 (HKDF), a third-party `reedsolo` RS(255,223) parity
   vector, and the CCSDS K=7 R=1/2 Viterbi impulse response.
-- **113 tests green, ~97% line coverage**; `clippy -D warnings`, `cargo fmt`,
-  `cargo doc` (no warnings), and `cargo audit` gate every commit.
+- **Comprehensive test suite green** (unit + doctests + KATs); `clippy -D warnings`,
+  `cargo fmt`, `cargo doc` (no warnings), and `cargo audit` gate every commit, with
+  an MSRV check in CI. See the CI badge for the current status.
 - Vetted **RustCrypto** primitives for the cipher/KDF/MAC/HKDF — **no rolled crypto**.
   Only the FEC (a non-security layer) is BolivarTech's own code.
 
