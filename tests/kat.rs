@@ -271,9 +271,88 @@ fn test_sr_f5_rs255_codeword_parity_and_known_error_correction() {
     );
 }
 
+/// SR-F5 / SR-F1 (L11): two additional independent multi-symbol error patterns
+/// through the crate `ReedSolomonCodec` recover exactly within capacity, and a
+/// 17-symbol pattern surfaces a typed `ErrorCorrection` error (fail-loud). The
+/// data blocks and error positions are chosen/documented here, independent of the
+/// parity reference above.
+#[test]
+fn test_sr_f5_rs255_additional_error_patterns_recover_and_fail_loud() {
+    use cryptovault::error::CryptoError;
+
+    let rs = ReedSolomonCodec;
+
+    // Pattern A — `b[i] = (7*i + 3) mod 256`, 12 scattered errors (< t).
+    let data_a: Vec<u8> = (0..RS_DATA).map(|i| (7 * i + 3) as u8).collect();
+    let enc_a = rs.encode(&data_a);
+    const POS_A: [usize; 12] = [0, 11, 22, 55, 90, 111, 150, 177, 200, 210, 221, 254];
+    let mut corrupt_a = enc_a.clone();
+    for &p in &POS_A {
+        corrupt_a[p] ^= 0xA5;
+    }
+    assert_eq!(
+        rs.decode(&corrupt_a, data_a.len()).unwrap(),
+        data_a,
+        "pattern A: 12 known scattered errors corrected exactly"
+    );
+
+    // Pattern B — constant `0xC3`, exactly 16 errors (= t): 8 contiguous + 8 spread.
+    let data_b: Vec<u8> = vec![0xC3u8; RS_DATA];
+    let enc_b = rs.encode(&data_b);
+    const POS_B: [usize; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 60, 80, 120, 160, 200, 230, 240, 250];
+    let mut corrupt_b = enc_b.clone();
+    for &p in &POS_B {
+        corrupt_b[p] ^= 0xFF;
+    }
+    assert_eq!(
+        rs.decode(&corrupt_b, data_b.len()).unwrap(),
+        data_b,
+        "pattern B: 16 known errors (at capacity) corrected exactly"
+    );
+
+    // 17 distinct errors exceed `t` → typed ErrorCorrection, never mis-corrected.
+    const POS_C: [usize; 17] = [
+        0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240,
+    ];
+    let mut corrupt_c = enc_b.clone();
+    for &p in &POS_C {
+        corrupt_c[p] ^= 0x3C;
+    }
+    assert!(
+        matches!(
+            rs.decode(&corrupt_c, data_b.len()),
+            Err(CryptoError::ErrorCorrection(_))
+        ),
+        "17 errors must fail loud, never silently mis-correct"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Viterbi K=7 R=1/2 — CCSDS impulse reference + known blob body.
 // ---------------------------------------------------------------------------
+
+/// SR-F5 / SR-F3 (L11): two distinct known RS-streams round-trip through the
+/// crate `ViterbiCodec` with a within-capacity coded-bit error injected —
+/// exercising different trellis-state trajectories beyond the impulse vector.
+#[test]
+fn test_sr_f5_viterbi_distinct_streams_roundtrip_within_capacity() {
+    let v = ViterbiCodec;
+    let streams: [Vec<u8>; 2] = [
+        (0..RS_BLOCK as u32).map(|i| (13 * i + 7) as u8).collect(),
+        vec![0xF0u8; RS_BLOCK],
+    ];
+    for stream in &streams {
+        let mut body = v.encode(stream);
+        assert_eq!(body.len(), 2 * RS_BLOCK + 2, "coded body is 2L + 2 bytes");
+        let mid = body.len() / 2;
+        body[mid] ^= 0x01; // one coded-bit error, within capacity
+        assert_eq!(
+            v.decode(&body).unwrap(),
+            *stream,
+            "distinct RS-stream recovered exactly through a single-bit error"
+        );
+    }
+}
 
 /// SR-F5 / SR-F3 / P0-3: the inner Viterbi codec reproduces the independent
 /// CCSDS 131.0-B impulse response `[0xBA, 0x48]` (via the underlying encoder),

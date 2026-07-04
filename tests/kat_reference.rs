@@ -23,10 +23,12 @@
 //!   `G2 = 0o133` (G2 output inverted), MSB-first — not copied from the crate.
 //!
 //! These are provisional independent references sufficient to de-risk Task 0b.
-//! The full, signed external FEC review remains a separate release gate
-//! (Task 25); until then the Viterbi vector is a single hand-traced impulse and
-//! the RS vector is a single `reedsolo`-sourced codeword — adequate here, not a
-//! substitute for that review.
+//! The single parity/impulse anchors are complemented by additional independent
+//! **error-pattern** KATs (L11): two more multi-symbol RS(255,223) patterns over
+//! distinct known blocks (exact recovery within `t = 16`, fail-loud at 17) and a
+//! Viterbi trellis check round-tripping two distinct RS-streams through a
+//! within-capacity error. The full, signed external FEC review remains a separate
+//! release gate (Task 25); this corpus is adequate here, not a substitute for it.
 
 use reedsolomon::{ReedSolomon, RsError};
 use viterbi::{CcsdsViterbiDecoder, CodeParams, ViterbiEncoder};
@@ -181,4 +183,100 @@ fn test_sr_f1_rs_fails_loud_beyond_capacity() {
         ),
         "non-multiple-of-255 stream is a typed InvalidInput"
     );
+}
+
+// ---------------------------------------------------------------------------
+// L11 — additional independent RS(255,223) multi-symbol error patterns.
+//
+// These extend the thin single-pattern corpus with two more independent error
+// patterns over *distinct* known 223-byte data blocks and *distinct* fixed error
+// positions (provenance: the blocks and positions are chosen and documented here,
+// unrelated to the reedsolo parity reference above). Each asserts exact recovery
+// within the RS(255,223) capacity `t = 16`, plus a 17-error pattern that must
+// fail loud with `Uncorrectable` rather than silently mis-correct.
+// ---------------------------------------------------------------------------
+
+/// SR-F1 (L11): two independent multi-symbol error patterns over distinct known
+/// blocks recover exactly within capacity, and a 17-symbol pattern fails loud.
+#[test]
+fn test_sr_f1_rs_multi_symbol_error_patterns_recover_within_capacity() {
+    let rs = ReedSolomon::default();
+
+    // Pattern A — data block `b[i] = (7*i + 3) mod 256`; 12 scattered errors
+    // (< t) at fixed positions across data and parity regions.
+    let data_a: Vec<u8> = (0..RS_DATA).map(|i| (7 * i + 3) as u8).collect();
+    let enc_a = rs.encode(&data_a).expect("RS encode A");
+    const POS_A: [usize; 12] = [0, 11, 22, 55, 90, 111, 150, 177, 200, 210, 221, 254];
+    let mut corrupt_a = enc_a.clone();
+    for &p in &POS_A {
+        corrupt_a[p] ^= 0xA5;
+    }
+    assert_eq!(
+        rs.decode(&corrupt_a, data_a.len())
+            .expect("12 <= 16 errors correctable"),
+        data_a,
+        "pattern A: 12 known scattered errors corrected exactly"
+    );
+
+    // Pattern B — constant data block `0xC3`; exactly 16 errors (= t), a
+    // contiguous run of 8 plus 8 scattered, mixing burst and spread positions.
+    let data_b: Vec<u8> = vec![0xC3u8; RS_DATA];
+    let enc_b = rs.encode(&data_b).expect("RS encode B");
+    const POS_B: [usize; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 60, 80, 120, 160, 200, 230, 240, 250];
+    let mut corrupt_b = enc_b.clone();
+    for &p in &POS_B {
+        corrupt_b[p] ^= 0xFF;
+    }
+    assert_eq!(
+        rs.decode(&corrupt_b, data_b.len())
+            .expect("16 errors at capacity correctable"),
+        data_b,
+        "pattern B: 16 known errors (at capacity) corrected exactly"
+    );
+
+    // 17 distinct errors on pattern B exceed `t = 16` → Uncorrectable, never a
+    // silent mis-correction.
+    const POS_C: [usize; 17] = [
+        0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240,
+    ];
+    let mut corrupt_c = enc_b.clone();
+    for &p in &POS_C {
+        corrupt_c[p] ^= 0x3C;
+    }
+    assert!(
+        matches!(
+            rs.decode(&corrupt_c, data_b.len()),
+            Err(RsError::Uncorrectable(_))
+        ),
+        "17 errors must be declared Uncorrectable, never mis-corrected"
+    );
+}
+
+/// SR-F3 (L11): two distinct known RS-streams round-trip through the Viterbi
+/// encode/decode pair with a within-capacity coded-bit error injected — exercising
+/// varied trellis-state trajectories beyond the single impulse vector. Inputs and
+/// the error position are documented here (independent of any crate output).
+#[test]
+fn test_sr_f3_viterbi_distinct_streams_roundtrip_within_capacity() {
+    let enc = ViterbiEncoder::new(CodeParams::ccsds_r1_2()).expect("CCSDS params are valid");
+    let mut dec =
+        CcsdsViterbiDecoder::new(CodeParams::ccsds_r1_2(), 100_000).expect("decoder config valid");
+
+    // Two distinct info streams drive different survivor-path trajectories:
+    // a mixing arithmetic sequence and a long-run constant.
+    let streams: [Vec<u8>; 2] = [
+        (0..RS_BLOCK as u32).map(|i| (13 * i + 7) as u8).collect(),
+        vec![0xF0u8; RS_BLOCK],
+    ];
+    for stream in &streams {
+        let mut coded = enc.encode(stream).expect("encode within cap");
+        // One coded-bit error in the middle of the body (within Viterbi capacity).
+        let mid = coded.bytes.len() / 2;
+        coded.bytes[mid] ^= 0x01;
+        let decoded = dec.decode_block(&coded).expect("within-capacity decode");
+        assert_eq!(
+            &decoded.bytes, stream,
+            "distinct RS-stream recovered exactly through a single-bit error"
+        );
+    }
 }
