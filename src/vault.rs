@@ -194,6 +194,11 @@ pub struct CryptoVault {
     cipher: Box<dyn AuthenticatedCipher>,
     /// Error-correction strategy (the concatenated FEC by default).
     fec: Box<dyn ErrorCorrection>,
+    /// Per-vault cap on the accepted **decoded** blob length (M3), enforced on
+    /// the decrypt path before FEC decode. Defaults to [`MAX_BLOB_LEN`] and is
+    /// clamped to it by [`with_max_blob_len`](Self::with_max_blob_len); a service
+    /// can lower it to bound worst-case FEC-decode CPU for untrusted callers.
+    max_blob_len: usize,
 }
 
 impl CryptoVault {
@@ -216,7 +221,35 @@ impl CryptoVault {
         cipher: Box<dyn AuthenticatedCipher>,
         fec: Box<dyn ErrorCorrection>,
     ) -> Self {
-        Self { kdf, cipher, fec }
+        Self {
+            kdf,
+            cipher,
+            fec,
+            max_blob_len: MAX_BLOB_LEN,
+        }
+    }
+
+    /// Sets a per-vault cap on the accepted **decoded** blob length (M3),
+    /// returning the reconfigured vault (builder style).
+    ///
+    /// The decrypt path rejects any received blob whose decoded length exceeds
+    /// this cap **before** running the FEC decode, so a service can bound the
+    /// worst-case FEC-decode CPU an untrusted caller can force with a single
+    /// structurally-valid junk blob. `cap` is **clamped to [`MAX_BLOB_LEN`]** (the
+    /// wire format never admits a larger blob); the default is [`MAX_BLOB_LEN`]
+    /// (no extra restriction). This changes no wire format — it only tightens
+    /// what this vault instance will accept on decode.
+    ///
+    /// # Parameters
+    /// - `cap`: the maximum decoded blob length to accept (clamped to
+    ///   [`MAX_BLOB_LEN`]).
+    ///
+    /// # Returns
+    /// The vault with the tightened accept cap.
+    #[must_use]
+    pub fn with_max_blob_len(mut self, cap: usize) -> Self {
+        self.max_blob_len = cap.min(MAX_BLOB_LEN);
+        self
     }
 
     /// Derives the session **master** secret from a passphrase and per-context
@@ -440,6 +473,14 @@ impl CryptoVault {
         let decoded = STANDARD
             .decode(b64)
             .map_err(|e| CryptoError::Encoding(format!("base64 decode failed: {e}")))?;
+        // (2b) M3: enforce the per-vault accept cap on the decoded blob BEFORE the
+        // FEC decode, so an untrusted caller cannot force worst-case FEC-decode CPU
+        // beyond this vault's configured bound (default MAX_BLOB_LEN).
+        if decoded.len() > self.max_blob_len {
+            return Err(CryptoError::InvalidInput(
+                "input exceeds maximum size".into(),
+            ));
+        }
         // (3) Structural validation + FEC-correct + recover the header (SR-R3/R6).
         // `decode_blob` already validated the recovered version == BLOB_VERSION,
         // so the reconstructed header matches the error-corrected one.
@@ -998,6 +1039,30 @@ mod byte_core_tests {
         let blob = v.encrypt_with_key(&[0u8; KEY_LEN], "x").unwrap();
         assert!(matches!(
             v.decrypt_with_key(&[], &blob),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// M3: a per-vault `max_blob_len` cap (default `MAX_BLOB_LEN`, clamped) lets a
+    /// service bound worst-case FEC-decode CPU. A vault with a small cap rejects a
+    /// blob whose decoded length exceeds the cap with `InvalidInput`, while the
+    /// default vault still round-trips the same blob. No wire-format change.
+    #[test]
+    fn test_m3_per_vault_max_blob_len_cap_rejects_oversized_blob() {
+        let master = [0x11u8; KEY_LEN];
+        let default_vault = CryptoVault::default();
+        let blob = default_vault
+            .encrypt_bytes(&master, b"payload to protect")
+            .unwrap();
+        // Default vault (cap = MAX_BLOB_LEN) round-trips the blob.
+        assert_eq!(
+            &*default_vault.decrypt_bytes(&master, &blob).unwrap(),
+            b"payload to protect"
+        );
+        // A vault with a tiny cap rejects the same, larger, blob before FEC decode.
+        let capped = CryptoVault::default().with_max_blob_len(64);
+        assert!(matches!(
+            capped.decrypt_bytes(&master, &blob),
             Err(CryptoError::InvalidInput(_))
         ));
     }
