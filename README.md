@@ -173,9 +173,6 @@ assert_eq!(&*unwrapped, &*dek);
 - Vetted **RustCrypto** primitives for the cipher/KDF/MAC/HKDF — **no rolled crypto**.
   Only the FEC (a non-security layer) is BolivarTech's own code.
 
-> **Note.** "Defense-grade" is an *internal* engineering quality-bar, not a public
-> claim or certification target.
-
 ## MSRV
 
 Rust **1.70** or newer.

@@ -21,7 +21,9 @@ planning/
 # ~/BolivarTech/AI_Tools/ for reuse across repos.
 /scripts/graphify_ollama.py
 /scripts/claude_usage.py
+/scripts/sleep_signal.py
 claude-usage*.txt
+run-tests.py
 
 # Python bytecode/caches from dev scripts
 __pycache__/

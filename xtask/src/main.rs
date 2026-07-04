@@ -114,8 +114,8 @@ fn review_gate() -> ExitCode {
             eprintln!(
                 "review-gate: FAIL — required signed FEC review is missing.\n\
                  \x20 expected: {}\n\
-                 \x20 An external review of reedsolomon 0.1.0 / viterbi 0.0.1 (see\n\
-                 \x20 {REVIEWS_DIR}/TEMPLATE.md) MUST be completed and signed before a\n\
+                 \x20 An external review of reedsolomon 0.1.0 / viterbi 0.0.1 MUST\n\
+                 \x20 be completed and signed before a\n\
                  \x20 v{version} tag. This gate is NOT waivable by a flag; a genuine\n\
                  \x20 waiver requires a documented owner sign-off + rationale in the\n\
                  \x20 release notes.",
