@@ -384,7 +384,7 @@ fn test_sr_f5_block_interleaver_known_permutation_and_partial_window() {
 fn test_sr_f5_csprng_layer_golden_vector_and_partial_window() {
     // Single-codeword window keeps the golden vector short while exercising the
     // full derivation.
-    let layer = CsprngLayer::new([0x42u8; KEY_LEN]).unwrap();
+    let layer = CsprngLayer::new(&[0x42u8; KEY_LEN]).unwrap();
     let window_len = RS_BLOCK;
     let stream: Vec<u8> = (0..RS_BLOCK as u32).map(|i| i as u8).collect();
     let out = layer.interleave(&stream, window_len);

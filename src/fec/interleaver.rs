@@ -196,18 +196,27 @@ pub struct CsprngLayer {
 }
 
 impl CsprngLayer {
-    /// Creates the CSPRNG layer from a 32-byte key-derived interleaver seed.
+    /// Creates the CSPRNG layer from a key-derived interleaver seed slice.
+    ///
+    /// Accepts the seed **by reference** and copies it into the internal
+    /// [`Zeroizing`] field, so a caller need not first materialize an
+    /// un-zeroized `[u8; KEY_LEN]` on the stack (L7).
     ///
     /// # Parameters
-    /// - `seed`: the HKDF-derived interleaver seed (never the raw AEAD key).
+    /// - `seed`: the HKDF-derived interleaver seed, exactly [`KEY_LEN`] bytes
+    ///   (never the raw AEAD key).
     ///
     /// # Errors
-    /// Currently infallible; returns `Result` for forward-compatibility with the
-    /// fallible-constructor convention (SR-C3 / OOP explicit constructors).
-    pub fn new(seed: [u8; KEY_LEN]) -> Result<Self> {
-        Ok(Self {
-            seed: Zeroizing::new(seed),
-        })
+    /// [`CryptoError::InvalidInput`] if `seed` is not exactly [`KEY_LEN`] bytes.
+    pub fn new(seed: &[u8]) -> Result<Self> {
+        if seed.len() != KEY_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "interleaver seed must be exactly {KEY_LEN} bytes"
+            )));
+        }
+        let mut buf = Zeroizing::new([0u8; KEY_LEN]);
+        buf.copy_from_slice(seed);
+        Ok(Self { seed: buf })
     }
 
     /// Draws the next unbiased index in `0..range` from the keystream.
@@ -343,7 +352,24 @@ impl Interleaver {
 #[cfg(test)]
 mod tests {
     use super::{BlockInterleaver, CsprngLayer, Interleaver};
+    use crate::error::CryptoError;
     use crate::{KEY_LEN, RS_BLOCK, RS_INTERLEAVE_MAX};
+
+    /// L7: `CsprngLayer::new` takes the seed by reference and validates its
+    /// length — a correct-length slice constructs, a wrong-length one is rejected
+    /// with `InvalidInput` (never silently padded/truncated).
+    #[test]
+    fn test_l7_csprng_layer_new_validates_seed_length() {
+        assert!(CsprngLayer::new(&[0u8; KEY_LEN][..]).is_ok());
+        assert!(matches!(
+            CsprngLayer::new(&[0u8; KEY_LEN - 1][..]),
+            Err(CryptoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            CsprngLayer::new(&[0u8; KEY_LEN + 1][..]),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
 
     /// SR-F2 / P0-1: interleave then deinterleave is the identity, including a
     /// trailing partial window (`5*RS_BLOCK + 100` is not a whole window).
@@ -365,7 +391,7 @@ mod tests {
 
         let combined = Interleaver::BlockThenCsprng(
             BlockInterleaver::new(5).unwrap(),
-            CsprngLayer::new([0x5Au8; KEY_LEN]).unwrap(),
+            CsprngLayer::new(&[0x5Au8; KEY_LEN]).unwrap(),
         );
         assert_eq!(combined.deinterleave(&combined.interleave(&stream)), stream);
         assert_ne!(
@@ -483,7 +509,7 @@ mod tests {
     /// exactly, including a trailing partial window.
     #[test]
     fn test_sr_f2_csprng_layer_roundtrip() {
-        let layer = CsprngLayer::new([0x11u8; KEY_LEN]).unwrap();
+        let layer = CsprngLayer::new(&[0x11u8; KEY_LEN]).unwrap();
         let window_len = 5 * RS_BLOCK;
         let stream: Vec<u8> = (0..(window_len + 137)).map(|i| i as u8).collect();
         let out = layer.interleave(&stream, window_len);
@@ -498,10 +524,10 @@ mod tests {
         let seed = [0x2Au8; KEY_LEN];
         let window_len = 5 * RS_BLOCK;
         let stream: Vec<u8> = (0..window_len).map(|i| i as u8).collect();
-        let a = CsprngLayer::new(seed)
+        let a = CsprngLayer::new(&seed)
             .unwrap()
             .interleave(&stream, window_len);
-        let b = CsprngLayer::new(seed)
+        let b = CsprngLayer::new(&seed)
             .unwrap()
             .interleave(&stream, window_len);
         assert_eq!(a, b, "same seed → identical permutation");
@@ -516,10 +542,10 @@ mod tests {
     fn test_sr_f2_csprng_layer_seed_sensitivity() {
         let window_len = 5 * RS_BLOCK;
         let stream: Vec<u8> = (0..window_len).map(|i| i as u8).collect();
-        let a = CsprngLayer::new([1u8; KEY_LEN])
+        let a = CsprngLayer::new(&[1u8; KEY_LEN])
             .unwrap()
             .interleave(&stream, window_len);
-        let b = CsprngLayer::new([2u8; KEY_LEN])
+        let b = CsprngLayer::new(&[2u8; KEY_LEN])
             .unwrap()
             .interleave(&stream, window_len);
         assert_ne!(a, b, "distinct seeds → distinct permutations");
@@ -530,7 +556,7 @@ mod tests {
     /// (the wire format for the optional layer).
     #[test]
     fn test_p0_1_csprng_layer_golden_kat() {
-        let layer = CsprngLayer::new([0x42u8; KEY_LEN]).unwrap();
+        let layer = CsprngLayer::new(&[0x42u8; KEY_LEN]).unwrap();
         // One window of exactly RS_BLOCK bytes (single-codeword window) keeps the
         // golden vector short while exercising the full derivation.
         let window_len = RS_BLOCK;
@@ -559,7 +585,7 @@ mod tests {
     fn test_sr_f2_csprng_burst_clustering_matches_modeled_bound() {
         let depth = 5usize;
         let window_len = depth * RS_BLOCK;
-        let layer = CsprngLayer::new([0x7Fu8; KEY_LEN]).unwrap();
+        let layer = CsprngLayer::new(&[0x7Fu8; KEY_LEN]).unwrap();
 
         // Model: depth burst symbols → depth uniform codewords (balls-in-bins).
         // P(some codeword gets >=2) = 1 - depth!/depth^depth.
