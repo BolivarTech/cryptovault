@@ -363,6 +363,28 @@ mod concatenated_tests {
         ));
     }
 
+    /// L12 / M1-class: `with_csprng_from_master` validates the master length up
+    /// front (HKDF silently accepts any-length IKM, so a wrong-length master would
+    /// otherwise be expanded into a seed). An empty master is rejected with
+    /// `InvalidInput`; a correct `KEY_LEN` master still succeeds.
+    #[test]
+    fn test_l12_csprng_from_master_rejects_wrong_length_master() {
+        use crate::error::CryptoError;
+        use crate::KEY_LEN;
+
+        assert!(
+            matches!(
+                ConcatenatedFec::with_csprng_from_master(&[], 5),
+                Err(CryptoError::InvalidInput(_))
+            ),
+            "an empty (wrong-length) master must be rejected with InvalidInput"
+        );
+        assert!(
+            ConcatenatedFec::with_csprng_from_master(&[0u8; KEY_LEN], 5).is_ok(),
+            "a correct KEY_LEN master must still succeed"
+        );
+    }
+
     /// SR-F4 / SC-3: corruption beyond the concatenated code's capacity yields a
     /// typed error, never silently-wrong bytes.
     #[test]
