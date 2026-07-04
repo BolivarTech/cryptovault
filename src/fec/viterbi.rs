@@ -251,7 +251,7 @@ mod tests {
 
     /// Ceil-div `a / b` (manual const-safe form; `div_ceil` is not `const fn`).
     fn ceil_div(a: usize, b: usize) -> usize {
-        (a + b - 1) / b
+        a.div_ceil(b)
     }
 
     /// L1: the decoder constructor maps a failing configuration to a typed

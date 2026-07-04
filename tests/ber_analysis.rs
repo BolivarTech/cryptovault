@@ -86,7 +86,7 @@ impl Xorshift64 {
 /// ≥ 1).
 fn codeword_count(payload: usize) -> u64 {
     let protected = payload + PROTECTED_OVERHEAD;
-    ((protected + RS_DATA - 1) / RS_DATA).max(1) as u64
+    protected.div_ceil(RS_DATA).max(1) as u64
 }
 
 /// Empirically measures the per-codeword post-FEC failure probability `q(BER)`

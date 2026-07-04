@@ -421,7 +421,7 @@ mod boundary_tests {
 
     /// Ceil-div `a / b` (manual const-safe form; `div_ceil` is not `const fn`).
     fn ceil_div(a: usize, b: usize) -> usize {
-        (a + b - 1) / b
+        a.div_ceil(b)
     }
 
     /// Task 10 / SR-F1: the Reed-Solomon layer transition lands on whole codewords

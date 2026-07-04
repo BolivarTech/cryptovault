@@ -249,9 +249,9 @@ pub const ARGON2_P: u32 = 4;
 pub const MAX_BLOB_LEN: usize = {
     let protected_max = MAX_PLAINTEXT_LEN + HEADER_LEN + NONCE_LEN + TAG_LEN;
     // Ceil-div written out (const-safe; `div_ceil` is not a `const fn`).
-    let rs_blocks = (protected_max + RS_DATA - 1) / RS_DATA;
+    let rs_blocks = protected_max.div_ceil(RS_DATA);
     let rs_max = rs_blocks * RS_BLOCK;
-    let viterbi_chunks = (rs_max + VITERBI_CHUNK - 1) / VITERBI_CHUNK;
+    let viterbi_chunks = rs_max.div_ceil(VITERBI_CHUNK);
     rs_max * 2 + TERMINATION_OVERHEAD * viterbi_chunks
 };
 
