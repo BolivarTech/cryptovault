@@ -180,7 +180,7 @@ fn chunk_body_lengths(total: usize) -> Result<Vec<usize>> {
     let rem = total % FULL_CHUNK_BODY;
     let mut bodies = vec![FULL_CHUNK_BODY; full];
     if rem != 0 {
-        if rem < MIN_CHUNK_BODY || rem % 2 != 0 {
+        if rem < MIN_CHUNK_BODY || !rem.is_multiple_of(2) {
             // SR-R7: generic, oracle-free message — no exact lengths or
             // Viterbi-framing detail is echoed back on the decode path.
             return Err(CryptoError::InvalidInput("malformed blob".into()));

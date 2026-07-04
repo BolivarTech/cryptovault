@@ -41,7 +41,10 @@ use cryptovault::{KEY_LEN, RS_BLOCK, RS_DATA, RS_PARITY};
 /// vectors can be pasted close to verbatim.
 fn hex(s: &str) -> Vec<u8> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(s.len() % 2 == 0, "hex string must have an even length");
+    assert!(
+        s.len().is_multiple_of(2),
+        "hex string must have an even length"
+    );
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))

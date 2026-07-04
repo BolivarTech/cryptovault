@@ -27,7 +27,7 @@ pub struct ReedSolomonCodec;
 /// or `None` if `byte_len` is not a whole multiple of [`RS_BLOCK`] (a
 /// structurally invalid stream — SR-F1 / SR-R3).
 const fn block_count(byte_len: usize) -> Option<usize> {
-    if byte_len % RS_BLOCK == 0 {
+    if byte_len.is_multiple_of(RS_BLOCK) {
         Some(byte_len / RS_BLOCK)
     } else {
         None
