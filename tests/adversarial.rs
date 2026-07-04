@@ -13,12 +13,14 @@
 //! * an oversized base64 string (`> MAX_B64_LEN`) rejected **before** decode
 //!   allocates (SR-R4 pre-allocation DoS guard),
 //! * an oversized decoded blob (`> MAX_BLOB_LEN`) and its `+1` off-by-one,
-//! * a bad `version` byte (recovered from inside the FEC, SR-R1),
 //! * a body whose length is not a valid chunked-Viterbi frame (SR-R3a),
 //! * all-`0x00` / all-`0xFF` junk,
 //! * non-canonical base64 as three distinct vectors — bad alphabet, bad padding,
-//!   trailing bits (SR-F6),
-//! * a header `plaintext_len` exceeding `MAX_PLAINTEXT_LEN` (SR-R6).
+//!   trailing bits (SR-F6).
+//!
+//! The crafted bad-`version` and oversized-`plaintext_len` vectors (which need
+//! the crate-private blob wire layer, L4) are covered by the `src/blob.rs`
+//! `full_path_crafted_tests` unit tests instead.
 //!
 //! These run against the fully-implemented API and are expected to PASS; a panic
 //! or a wrong-variant / `Ok` result would surface a real defect.
@@ -26,11 +28,9 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
-use cryptovault::blob::encode_blob;
 use cryptovault::error::CryptoError;
-use cryptovault::fec::ConcatenatedFec;
 use cryptovault::vault::CryptoVault;
-use cryptovault::{KEY_LEN, MAX_B64_LEN, MAX_BLOB_LEN, MAX_PLAINTEXT_LEN, NONCE_LEN, TAG_LEN};
+use cryptovault::{KEY_LEN, MAX_B64_LEN, MAX_BLOB_LEN};
 
 /// A valid 32-byte master to drive the decrypt path — the hostility is entirely
 /// in the ciphertext argument, not the key.
@@ -69,16 +69,6 @@ struct Case {
     allowed: &'static [Variant],
 }
 
-/// Base64-encodes a FEC-valid blob built with an arbitrary `version` and
-/// `plaintext_len` header, so the corpus can probe the post-FEC header checks
-/// (bad version, oversized `plaintext_len`) that only fire once structural
-/// validation and FEC-decode succeed.
-fn crafted_blob_b64(version: u8, plaintext_len: u32, body_len: usize) -> String {
-    let fec = ConcatenatedFec::default();
-    let body: Vec<u8> = (0..body_len).map(|i| (i * 7 + 1) as u8).collect();
-    STANDARD.encode(encode_blob(&fec, version, plaintext_len, &body))
-}
-
 /// Builds the small-payload adversarial corpus (the heavy ~megabyte vectors live
 /// in their own tests to bound peak memory per case).
 fn small_corpus() -> Vec<Case> {
@@ -95,22 +85,9 @@ fn small_corpus() -> Vec<Case> {
         });
     }
 
-    // A structurally-valid FEC frame carrying an unsupported version byte — the
-    // version is recovered error-corrected from inside the FEC (SR-R1) and
-    // rejected before AEAD-open.
-    cases.push(Case {
-        name: "bad_version_byte",
-        input: crafted_blob_b64(2, 0, NONCE_LEN + TAG_LEN),
-        allowed: &[Variant::InvalidInput],
-    });
-
-    // A header claiming a plaintext_len above the 10 MiB cap (SR-R6) — rejected
-    // before any truncation/over-allocation.
-    cases.push(Case {
-        name: "plaintext_len_over_cap",
-        input: crafted_blob_b64(1, (MAX_PLAINTEXT_LEN + 1) as u32, NONCE_LEN + TAG_LEN),
-        allowed: &[Variant::InvalidInput],
-    });
+    // (The crafted bad-version and oversized-`plaintext_len` vectors, which need
+    // the crate-private blob wire layer, are covered by the `src/blob.rs`
+    // `full_path_crafted_tests` unit tests — L4.)
 
     // A body length that cannot be a `2·L + 2` chunked-Viterbi frame (odd) — the
     // pre-FEC structural gate rejects it (SR-R3a), never a panic.

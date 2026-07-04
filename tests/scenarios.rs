@@ -4,10 +4,14 @@
 //! Task 20 — BDD acceptance scenarios `SC-1..SC-8` (CERTIFICATION BAR).
 //!
 //! End-to-end coverage of the eight behaviour scenarios from
-//! `sbtdd/spec-behavior.md`, exercised **only** through the crate's public API
-//! (`CryptoVault` + the public `blob`/`fec` helpers). Each `#[test]` maps to one
-//! scenario and carries its `SC-*` / `SR-*` id; boundary variants (payload sizes,
-//! burst sizes, adversarial inputs) live inside the corresponding test.
+//! `sbtdd/spec-behavior.md`, exercised **only** through the public
+//! [`CryptoVault`] API. Each `#[test]` maps to one scenario and carries its
+//! `SC-*` / `SR-*` id; boundary variants (payload sizes, burst sizes, adversarial
+//! inputs) live inside the corresponding test.
+//!
+//! SC-4 (tampered header) needs to craft a blob at the now crate-private wire
+//! layer, so it lives as a `src/blob.rs` unit test
+//! (`full_path_crafted_tests::test_sc_4_tampered_header_fails_authentication`, L4).
 //!
 //! ## Channel model
 //!
@@ -21,11 +25,9 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 
-use cryptovault::blob::{decode_blob, encode_blob};
 use cryptovault::error::CryptoError;
-use cryptovault::fec::ConcatenatedFec;
 use cryptovault::vault::CryptoVault;
-use cryptovault::{BLOB_VERSION, MAX_B64_LEN, SALT_LEN};
+use cryptovault::{MAX_B64_LEN, SALT_LEN};
 
 /// A fixed raw 32-byte master/KEK. The public `wrap_key`/`unwrap_key` and
 /// `encrypt_with_key`/`decrypt_with_key` accept the master directly (they
@@ -148,48 +150,10 @@ fn test_sc_3_corruption_beyond_capacity_is_typed_error_never_wrong_plaintext() {
 // ---------------------------------------------------------------------------
 // SC-4 — Tampered header (AAD binding).
 // ---------------------------------------------------------------------------
-
-/// SC-4 (SR-C4, SR-R6): a header whose `plaintext_len` or `version` is altered
-/// beyond FEC capacity (modelled by re-encoding the recovered body under a
-/// tampered header) fails the AEAD tag / structural check — never wrong
-/// plaintext. The header is bound as AAD, so an altered-but-error-corrected
-/// header cannot pass authentication.
-#[test]
-fn test_sc_4_tampered_header_fails_authentication() {
-    let v = CryptoVault::default();
-    let fec = ConcatenatedFec::default();
-    let pt: Vec<u8> = (0..48u8).collect();
-
-    // Recover the genuine (version, plaintext_len, body) of a real blob.
-    let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
-    let raw = STANDARD.decode(&blob).unwrap();
-    let (version, plaintext_len, body) = decode_blob(&fec, &raw).unwrap();
-    assert_eq!(version, BLOB_VERSION);
-    assert_eq!(plaintext_len as usize, pt.len());
-
-    // (a) Tamper `plaintext_len` (still ≤ body capacity): the recovered header no
-    // longer matches the AAD the ciphertext was sealed under → AEAD Cipher error.
-    let tampered_len = encode_blob(&fec, BLOB_VERSION, plaintext_len - 1, &body);
-    let b64_len = STANDARD.encode(&tampered_len);
-    assert!(
-        matches!(
-            v.unwrap_key(&MASTER, &SALT, &b64_len),
-            Err(CryptoError::Cipher(_))
-        ),
-        "tampered plaintext_len must fail the AEAD tag"
-    );
-
-    // (b) Tamper `version`: decode rejects an unknown version before AEAD-open.
-    let tampered_ver = encode_blob(&fec, BLOB_VERSION + 1, plaintext_len, &body);
-    let b64_ver = STANDARD.encode(&tampered_ver);
-    assert!(
-        matches!(
-            v.unwrap_key(&MASTER, &SALT, &b64_ver),
-            Err(CryptoError::InvalidInput(_))
-        ),
-        "tampered version must be rejected as InvalidInput"
-    );
-}
+//
+// Moved to `src/blob.rs` (`full_path_crafted_tests`, L4): tampering the header
+// requires crafting a blob at the crate-private wire layer, which an integration
+// test can no longer reach — see this file's module docs.
 
 // ---------------------------------------------------------------------------
 // SC-5 — Wrong KEK / salt / password.
@@ -252,22 +216,18 @@ fn test_sc_5_wrong_kek_salt_or_password_reveals_no_key_material() {
 // ---------------------------------------------------------------------------
 
 /// SC-6 (SR-R3, SR-R5): an arbitrary hostile input — empty, 1-byte, truncated,
-/// oversized, bad-version, junk, or non-canonical base64 — yields a typed error
-/// without panicking and without unbounded allocation.
+/// oversized, junk, or non-canonical base64 — yields a typed error without
+/// panicking and without unbounded allocation. (The blob-crafted `bad-version`
+/// variant, which needs the crate-private wire layer, is covered by the
+/// `src/blob.rs` `full_path_crafted_tests` unit tests, L4.)
 #[test]
 fn test_sc_6_adversarial_blob_is_typed_error_without_panic() {
     let v = CryptoVault::default();
-    let fec = ConcatenatedFec::default();
 
-    // A genuine blob to derive truncated / bad-version variants from.
+    // A genuine blob to derive the truncated variant from.
     let good = v.wrap_key(&MASTER, &SALT, b"a small secret").unwrap();
 
     // Each entry: (label, input). Every one must return a typed error, no panic.
-    let bad_version = {
-        let raw = STANDARD.decode(&good).unwrap();
-        let (_v, pl, body) = decode_blob(&fec, &raw).unwrap();
-        STANDARD.encode(encode_blob(&fec, BLOB_VERSION + 1, pl, &body))
-    };
     let truncated = &good[..good.len() / 2];
     let oversized = "A".repeat(MAX_B64_LEN + 1);
     let junk_b64 = STANDARD.encode(vec![0xEFu8; 600]); // valid base64, junk bytes
@@ -277,7 +237,6 @@ fn test_sc_6_adversarial_blob_is_typed_error_without_panic() {
         ("one-byte", "A"),
         ("truncated", truncated),
         ("oversized-b64", &oversized),
-        ("bad-version", &bad_version),
         ("junk", &junk_b64),
         ("non-canonical-alphabet", "****"),
         ("bad-padding", "AB=C"),

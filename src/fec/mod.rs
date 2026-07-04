@@ -74,7 +74,7 @@ pub trait ErrorCorrection: Send + Sync {
     ///
     /// This is the **strategy-owned** structural gate on the decrypt path: each
     /// codec knows its own wire framing, so the blob layer
-    /// ([`crate::blob::decode_blob`]) delegates here instead of hard-coding the
+    /// (`decode_blob`) delegates here instead of hard-coding the
     /// concatenated-FEC chunk math — that math would reject a blob produced by a
     /// different strategy (e.g. the identity [`crate::vault::NoFec`], whose blob
     /// is a raw protected payload with no FEC structure). The gate caps
@@ -179,7 +179,7 @@ impl ErrorCorrection for ConcatenatedFec {
     /// original `data` truncated to `pre_len` (SR-F4).
     ///
     /// Stages, in order: **(1)** structural pre-FEC validation
-    /// ([`validate_pre_fec`], SR-R3a) derives the
+    /// (`validate_pre_fec`, SR-R3a) derives the
     /// expected RS-stream length `l` and rejects a malformed/oversized blob before
     /// any large allocation; **(2)** Viterbi decode; **(3)** a post-Viterbi
     /// length cross-check (`rs_stream.len() == l`, SR-R3b) that catches a
@@ -209,7 +209,7 @@ impl ErrorCorrection for ConcatenatedFec {
     /// Validates the chunked-Viterbi framing and returns the recovered RS data
     /// length (SR-R3a / SR-R4).
     ///
-    /// Delegates to the free [`validate_pre_fec`] (the single authoritative
+    /// Delegates to the free `validate_pre_fec` (the single authoritative
     /// chunked-Viterbi structural check, shared with [`decode`](Self::decode)'s
     /// SR-R3b cross-check), then maps the derived RS-stream length `l` to the
     /// pre-decode data length `(l / RS_BLOCK) · RS_DATA` — the exact `pre_len`

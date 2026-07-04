@@ -32,10 +32,14 @@ use crate::{
 ///
 /// # Examples
 ///
-/// ```
-/// use cryptovault::blob::{decode_blob, encode_blob};
-/// use cryptovault::fec::ConcatenatedFec;
-/// use cryptovault::BLOB_VERSION;
+/// Crate-internal (the `blob` module is `pub(crate)`, L4), so this is an
+/// illustration rather than a compiled doctest; the round-trip is exercised by
+/// the `blob_codec_tests` unit tests below.
+///
+/// ```ignore
+/// use crate::blob::{decode_blob, encode_blob};
+/// use crate::fec::ConcatenatedFec;
+/// use crate::BLOB_VERSION;
 ///
 /// let fec = ConcatenatedFec::default();
 /// let body = vec![9u8; 40];
@@ -168,10 +172,14 @@ pub fn decode_blob(fec: &dyn ErrorCorrection, received: &[u8]) -> Result<(u8, u3
 ///
 /// # Examples
 ///
-/// ```
-/// use cryptovault::blob::validate_pre_fec;
-/// use cryptovault::fec::ViterbiCodec;
-/// use cryptovault::RS_BLOCK;
+/// Crate-internal (the `blob` module is `pub(crate)`, L4), so this is an
+/// illustration rather than a compiled doctest; the behavior is exercised by the
+/// `validation_tests` unit tests below.
+///
+/// ```ignore
+/// use crate::blob::validate_pre_fec;
+/// use crate::fec::ViterbiCodec;
+/// use crate::RS_BLOCK;
 ///
 /// // A Viterbi body encoding one RS codeword validates to L = RS_BLOCK.
 /// let body = ViterbiCodec.encode(&vec![0u8; RS_BLOCK]);
@@ -490,5 +498,109 @@ mod boundary_tests {
             "MAX_B64_LEN caps the base64 input before decode"
         );
         assert!(MAX_BLOB_LEN > MAX_PLAINTEXT_LEN);
+    }
+}
+
+#[cfg(test)]
+mod full_path_crafted_tests {
+    //! Full decrypt-path coverage for hostile blobs crafted at the wire layer.
+    //!
+    //! Migrated from `tests/scenarios.rs` (SC-4) and `tests/adversarial.rs` (L4):
+    //! `encode_blob`/`decode_blob` are now `pub(crate)`, so a crafted-blob attack
+    //! that must be driven through the **public** [`crate::vault::CryptoVault`]
+    //! door lives here as a unit test — it needs both the crate-private blob
+    //! crafting and the public API, which no integration test can combine anymore.
+
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+
+    use super::{decode_blob, encode_blob};
+    use crate::error::CryptoError;
+    use crate::fec::ConcatenatedFec;
+    use crate::vault::CryptoVault;
+    use crate::{BLOB_VERSION, MAX_PLAINTEXT_LEN, NONCE_LEN, TAG_LEN};
+
+    /// A fixed raw 32-byte master/KEK — the hostility is entirely in the crafted
+    /// ciphertext, never the key.
+    const MASTER: [u8; 32] = [0x5Au8; 32];
+    /// A fixed per-context salt bound as AAD by `wrap_key`/`unwrap_key`.
+    const SALT: [u8; 16] = [0xA5u8; 16];
+
+    /// SC-4 (SR-C4, SR-R6): a blob whose error-corrected header (`plaintext_len`
+    /// or `version`) is altered fails the AEAD tag / structural check through the
+    /// public door — never wrong plaintext. The header is bound as AAD, so an
+    /// altered-but-error-corrected header cannot authenticate.
+    #[test]
+    fn test_sc_4_tampered_header_fails_authentication() {
+        let v = CryptoVault::default();
+        let fec = ConcatenatedFec::default();
+        let pt: Vec<u8> = (0..48u8).collect();
+
+        // Recover the genuine (version, plaintext_len, body) of a real blob.
+        let blob = v.wrap_key(&MASTER, &SALT, &pt).unwrap();
+        let raw = STANDARD.decode(&blob).unwrap();
+        let (version, plaintext_len, body) = decode_blob(&fec, &raw).unwrap();
+        assert_eq!(version, BLOB_VERSION);
+        assert_eq!(plaintext_len as usize, pt.len());
+
+        // (a) Tamper `plaintext_len` (still ≤ body capacity): the recovered header
+        // no longer matches the AAD the ciphertext was sealed under → Cipher error.
+        let tampered_len = encode_blob(&fec, BLOB_VERSION, plaintext_len - 1, &body);
+        let b64_len = STANDARD.encode(&tampered_len);
+        assert!(
+            matches!(
+                v.unwrap_key(&MASTER, &SALT, &b64_len),
+                Err(CryptoError::Cipher(_))
+            ),
+            "tampered plaintext_len must fail the AEAD tag"
+        );
+
+        // (b) Tamper `version`: decode rejects an unknown version before AEAD-open.
+        let tampered_ver = encode_blob(&fec, BLOB_VERSION + 1, plaintext_len, &body);
+        let b64_ver = STANDARD.encode(&tampered_ver);
+        assert!(
+            matches!(
+                v.unwrap_key(&MASTER, &SALT, &b64_ver),
+                Err(CryptoError::InvalidInput(_))
+            ),
+            "tampered version must be rejected as InvalidInput"
+        );
+    }
+
+    /// Base64-encodes a FEC-valid blob built with an arbitrary `version` and
+    /// `plaintext_len` header, so the corpus can probe the post-FEC header checks
+    /// (bad version, oversized `plaintext_len`) through the public door.
+    fn crafted_blob_b64(version: u8, plaintext_len: u32, body_len: usize) -> String {
+        let fec = ConcatenatedFec::default();
+        let body: Vec<u8> = (0..body_len).map(|i| (i * 7 + 1) as u8).collect();
+        STANDARD.encode(encode_blob(&fec, version, plaintext_len, &body))
+    }
+
+    /// SR-R1 / SR-R6 (adversarial corpus): a structurally-valid FEC frame carrying
+    /// an unsupported `version` byte, and one whose header `plaintext_len` exceeds
+    /// `MAX_PLAINTEXT_LEN`, are each rejected with a typed `InvalidInput` through
+    /// the public `unwrap_key` door — recovered error-corrected from inside the
+    /// FEC, then rejected before AEAD-open, never a panic.
+    #[test]
+    fn test_sr_r6_crafted_bad_version_and_oversized_len_are_invalid_input() {
+        let v = CryptoVault::default();
+
+        let bad_version = crafted_blob_b64(2, 0, NONCE_LEN + TAG_LEN);
+        assert!(
+            matches!(
+                v.unwrap_key(&MASTER, &SALT, &bad_version),
+                Err(CryptoError::InvalidInput(_))
+            ),
+            "unsupported version byte must be rejected as InvalidInput"
+        );
+
+        let over_cap = crafted_blob_b64(1, (MAX_PLAINTEXT_LEN + 1) as u32, NONCE_LEN + TAG_LEN);
+        assert!(
+            matches!(
+                v.unwrap_key(&MASTER, &SALT, &over_cap),
+                Err(CryptoError::InvalidInput(_))
+            ),
+            "plaintext_len over the cap must be rejected as InvalidInput"
+        );
     }
 }

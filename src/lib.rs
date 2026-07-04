@@ -130,7 +130,12 @@
 //! assert_eq!(&*unwrapped, &*dek);
 //! ```
 
-pub mod blob;
+// `blob` is crate-private (L4): it exposes forgeable wire plumbing
+// (`encode_blob` / `decode_blob` / `validate_pre_fec`) that an untrusted caller
+// must never reach directly — the public doors are the vault's `*_with_key` /
+// `wrap_key` / `unwrap_key` API. Kept `pub(crate)` so the vault and blob-layer
+// unit tests can use it without widening the attack surface.
+pub(crate) mod blob;
 pub mod cipher;
 pub mod error;
 pub mod fec;
