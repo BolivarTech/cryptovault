@@ -72,7 +72,11 @@ pub struct Argon2Kdf;
 /// [`crate::KEY_LEN`]) all within Argon2's valid ranges. A failure would mean
 /// the pinned constants were edited to invalid values — a build-time bug, not a
 /// runtime condition, so no adversarial input can reach it.
-pub fn owasp_params() -> Params {
+///
+/// Crate-private (M5): [`argon2::Params`] is a third-party type, so exposing it
+/// across the public boundary would make an `argon2` version bump a silent
+/// public-API break (semver hazard). Nothing outside the crate needs it.
+pub(crate) fn owasp_params() -> Params {
     Params::new(
         crate::ARGON2_M_KIB,
         crate::ARGON2_T,
@@ -168,6 +172,29 @@ mod tests {
         // determinism: same password+salt -> same master
         let m2 = Argon2Kdf.derive_master(b"pw", &[0u8; SALT_LEN]).unwrap();
         assert_eq!(&*m, &*m2);
+    }
+
+    /// SR-F5 / SR-C2: the vault pins the OWASP-2025 Argon2id cost parameters
+    /// (`m=64 MiB, t=3, p=4`, 32-byte output) and `derive_master` is
+    /// deterministic. Migrated from `tests/kat.rs` (M5): `owasp_params` is now
+    /// crate-private, so this pinning check lives as a unit test where it can name
+    /// the function.
+    #[test]
+    fn test_sr_f5_argon2_owasp_params_pinned_and_deterministic() {
+        let p = owasp_params();
+        assert_eq!(
+            (p.m_cost(), p.t_cost(), p.p_cost(), p.output_len()),
+            (65536, 3, 4, Some(KEY_LEN)),
+            "OWASP-2025 Argon2id parameters are pinned"
+        );
+        let a = Argon2Kdf
+            .derive_master(b"kat-pw", &[0x11u8; SALT_LEN])
+            .unwrap();
+        let b = Argon2Kdf
+            .derive_master(b"kat-pw", &[0x11u8; SALT_LEN])
+            .unwrap();
+        assert_eq!(&*a, &*b, "same password+salt → same master");
+        assert_eq!(a.len(), KEY_LEN);
     }
 
     #[test]

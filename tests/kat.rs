@@ -34,9 +34,8 @@ use sha2::Sha256;
 use cryptovault::cipher::{Aes256GcmSivCipher, AuthenticatedCipher};
 use cryptovault::fec::{BlockInterleaver, CsprngLayer, ReedSolomonCodec};
 use cryptovault::fec::{ErrorCorrection, ViterbiCodec};
-use cryptovault::kdf::KeyDerivation;
-use cryptovault::kdf::{expand_aead_key, expand_interleaver_seed, owasp_params, Argon2Kdf};
-use cryptovault::{KEY_LEN, RS_BLOCK, RS_DATA, RS_PARITY, SALT_LEN};
+use cryptovault::kdf::{expand_aead_key, expand_interleaver_seed};
+use cryptovault::{KEY_LEN, RS_BLOCK, RS_DATA, RS_PARITY};
 
 /// Decodes a compact hex string (whitespace ignored) into bytes so the RFC
 /// vectors can be pasted close to verbatim.
@@ -156,26 +155,8 @@ fn test_sr_f5_rfc9106_argon2id_official_vector() {
     );
 }
 
-/// SR-F5 / SR-C2: the vault pins the OWASP-2025 Argon2id cost parameters
-/// (`m=64 MiB, t=3, p=4`, 32-byte output) and `derive_master` is deterministic —
-/// the crate wiring around the KDF primitive validated above.
-#[test]
-fn test_sr_f5_argon2_owasp_params_pinned_and_deterministic() {
-    let p = owasp_params();
-    assert_eq!(
-        (p.m_cost(), p.t_cost(), p.p_cost(), p.output_len()),
-        (65536, 3, 4, Some(KEY_LEN)),
-        "OWASP-2025 Argon2id parameters are pinned"
-    );
-    let a = Argon2Kdf
-        .derive_master(b"kat-pw", &[0x11u8; SALT_LEN])
-        .unwrap();
-    let b = Argon2Kdf
-        .derive_master(b"kat-pw", &[0x11u8; SALT_LEN])
-        .unwrap();
-    assert_eq!(&*a, &*b, "same password+salt → same master");
-    assert_eq!(a.len(), KEY_LEN);
-}
+// (SR-F5 Argon2 OWASP-params pinning test moved to `src/kdf.rs` unit tests —
+// M5 made `owasp_params` crate-private.)
 
 // ---------------------------------------------------------------------------
 // HKDF-SHA256 — RFC 5869 Appendix A.1 Test Case 1 (official vector).
