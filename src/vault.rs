@@ -311,6 +311,15 @@ impl CryptoVault {
     /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
     /// nonce sampling or AEAD failure.
     fn encrypt_bytes_aad(&self, master: &[u8], pt: &[u8], aad_extra: &[u8]) -> Result<String> {
+        // M1: reject a wrong-length master before any work. HKDF accepts
+        // any-length IKM, so without this an empty/truncated key would silently
+        // produce a valid blob under a key derivable from nothing — one check
+        // here covers all five public doors.
+        if master.len() != KEY_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "master key must be exactly {KEY_LEN} bytes"
+            )));
+        }
         // SR-R4: reject an over-cap plaintext before doing any work.
         if pt.len() > MAX_PLAINTEXT_LEN {
             return Err(CryptoError::InvalidInput(format!(
@@ -411,6 +420,14 @@ impl CryptoVault {
         b64: &str,
         aad_extra: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>> {
+        // M1: reject a wrong-length master before any work (mirrors the encrypt
+        // core) — the cipher's KEY_LEN check is otherwise bypassed by HKDF, which
+        // accepts any-length IKM.
+        if master.len() != KEY_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "master key must be exactly {KEY_LEN} bytes"
+            )));
+        }
         // (1) SR-R4: cap the base64 length BEFORE base64-decode allocates.
         if b64.len() > MAX_B64_LEN {
             return Err(CryptoError::InvalidInput(format!(
@@ -959,6 +976,31 @@ mod byte_core_tests {
     use super::CryptoVault;
     use crate::error::CryptoError;
     use crate::{KEY_LEN, MAX_B64_LEN, MAX_PLAINTEXT_LEN};
+
+    /// M1 (SR-C*): the byte cores reject a master that is not exactly `KEY_LEN`
+    /// bytes. An empty or truncated key must fail with `InvalidInput` on both the
+    /// encrypt and decrypt cores (covering all five public doors), never silently
+    /// encrypt under a key HKDF-derivable from nothing.
+    #[test]
+    fn test_m1_byte_cores_reject_wrong_length_master() {
+        let v = CryptoVault::default();
+        // Empty and short keys are rejected on the encrypt core.
+        assert!(matches!(
+            v.encrypt_with_key(&[], "x"),
+            Err(CryptoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            v.encrypt_with_key(&[0u8; KEY_LEN - 1], "x"),
+            Err(CryptoError::InvalidInput(_))
+        ));
+        // A correct-length key still works; its blob rejects an empty key on the
+        // decrypt core.
+        let blob = v.encrypt_with_key(&[0u8; KEY_LEN], "x").unwrap();
+        assert!(matches!(
+            v.decrypt_with_key(&[], &blob),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
 
     /// SC-1 / SR-C1: a plaintext encrypted then decrypted under the same master
     /// round-trips through the full AEAD + FEC + base64 pipeline exactly.
