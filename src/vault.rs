@@ -374,10 +374,9 @@ impl CryptoVault {
         }
         // SR-R4: reject an over-cap plaintext before doing any work.
         if pt.len() > MAX_PLAINTEXT_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "plaintext length {} exceeds MAX_PLAINTEXT_LEN ({MAX_PLAINTEXT_LEN})",
-                pt.len()
-            )));
+            return Err(CryptoError::InvalidInput(
+                "plaintext exceeds maximum size".into(),
+            ));
         }
         // SR-C3: HKDF-expand the master into the AEAD sub-key.
         let aead_key = expand_aead_key(master)?;
