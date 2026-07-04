@@ -24,7 +24,7 @@ them strictly separate:
 The security layer is applied **first**, the resilience layer **after**, so the FEC
 can never weaken a cryptographic guarantee:
 
-```
+```text
 TX:  data → [AEAD: Argon2id → HKDF-SHA256 + AES-256-GCM-SIV, header bound as AAD]
           → [Reed-Solomon RS(255,223)]
           → [interleaver: deterministic block (default) + optional CSPRNG layer]
@@ -38,7 +38,7 @@ Concatenated code: `VT(interleave(RS(AEAD(data))))`.
 
 The output is a base64 string over:
 
-```
+```text
 Viterbi( interleave( RS( version(1B) ‖ plaintext_len(u32 LE) ‖ nonce(12B) ‖ ciphertext ‖ tag(16B) ) ) )
 ```
 
@@ -118,6 +118,9 @@ node synchronization. Delivering blob boundaries (framing / packetization) is th
 caller's job; FEC correction capacity applies only *within* one correctly-framed blob.
 
 ## Usage
+
+> These examples are mirrored as compiled doctests in the crate-level Rustdoc
+> (`cargo test --doc`), so they are verified against the public API and cannot drift.
 
 ```rust
 use cryptovault::CryptoVault;

@@ -95,6 +95,40 @@
 //! The interleaver is obfuscation, not security.
 //!
 //! See `sbtdd/spec-behavior.md` for the full specification.
+//!
+//! # Examples
+//!
+//! Encrypt-and-authenticate with a derived session key (these examples mirror the
+//! `README.md` snippets and are compiled as doctests, so they cannot drift):
+//!
+//! ```
+//! use cryptovault::CryptoVault;
+//!
+//! let vault = CryptoVault::default();
+//! // Derive a session key once (Argon2id is memory-hard — cache the result).
+//! let salt = [0u8; 16]; // in production: cryptovault::generate_salt()?
+//! let key = vault.derive_key("master-passphrase", &salt).unwrap();
+//!
+//! let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
+//! let recovered = vault.decrypt_with_key(&key, &blob).unwrap();
+//! assert_eq!(recovered.as_str(), "sk-secret");
+//! ```
+//!
+//! Envelope key-wrapping (DEK/KEK):
+//!
+//! ```
+//! use cryptovault::{CryptoVault, generate_dek, generate_salt};
+//!
+//! let vault = CryptoVault::default();
+//! let salt = generate_salt().unwrap(); // per-context, once
+//! let kek = vault.derive_key("master-passphrase", &salt).unwrap();
+//! let dek = generate_dek().unwrap(); // random 32-byte DEK
+//!
+//! // The salt is bound as AAD, tying the wrapped DEK to its context.
+//! let wrapped = vault.wrap_key(&kek, &salt, &dek).unwrap();
+//! let unwrapped = vault.unwrap_key(&kek, &salt, &wrapped).unwrap();
+//! assert_eq!(&*unwrapped, &*dek);
+//! ```
 
 pub mod blob;
 pub mod cipher;
@@ -102,6 +136,15 @@ pub mod error;
 pub mod fec;
 pub mod kdf;
 pub mod vault;
+
+// Crate-root re-exports (H1): surface the primary types callers name so the
+// README / doc examples can `use cryptovault::CryptoVault` instead of reaching
+// through deep module paths. The `fec` trait + default stack are re-exported for
+// dependency injection into [`CryptoVault::new`]; the forgeable `blob` wire
+// plumbing is deliberately **not** re-exported.
+pub use error::{CryptoError, Result};
+pub use fec::{ConcatenatedFec, ErrorCorrection};
+pub use vault::{constant_time_eq, generate_dek, generate_salt, CryptoVault, NoFec};
 
 /// AES-256 key length (bytes).
 pub const KEY_LEN: usize = 32;
