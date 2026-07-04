@@ -118,9 +118,12 @@ impl ViterbiCodec {
             return Ok(Vec::new());
         }
         let bodies = chunk_body_lengths(blob_body.len())?;
-        let mut decoder = CcsdsViterbiDecoder::new(CodeParams::ccsds_r1_2(), VITERBI_CHUNK * 8)
-            // Statically valid: `VITERBI_CHUNK * 8 = 999_600 <= 1_000_000`.
-            .expect("max_info_bits is within MAX_SUPPORTED_INFO_BITS");
+        // L2: size the decoder scratch to the largest *actual* chunk body (info
+        // bytes), not always the full VITERBI_CHUNK — a tiny blob no longer
+        // allocates ~11 MB of decoder scratch. Every body is `2·il + 2`, so
+        // `b / 2 - 1` recovers its info-byte count; `bodies` is non-empty here.
+        let max_info_bytes = bodies.iter().map(|&b| b / 2 - 1).max().unwrap_or(0);
+        let mut decoder = build_decoder(max_info_bytes)?;
         let mut out = Vec::new();
         let mut offset = 0usize;
         for body_len in bodies {
@@ -134,6 +137,27 @@ impl ViterbiCodec {
         }
         Ok(out)
     }
+}
+
+/// Builds a CCSDS `K=7 R=1/2` hard-decision decoder sized to `max_info_bytes`
+/// info bytes (L1/L2).
+///
+/// L2: `max_info_bytes` is the largest *actual* chunk body, so the preallocated
+/// scratch tracks the real blob size instead of always the full
+/// [`VITERBI_CHUNK`]. L1: any constructor failure (an invalid config, or an OOM
+/// [`viterbi::ConfigError::AllocationFailed`]) is mapped to a typed
+/// [`CryptoError::ErrorCorrection`] instead of an `expect` panic on the decode
+/// path.
+///
+/// # Errors
+/// [`CryptoError::ErrorCorrection`] if the backing decoder cannot be
+/// constructed (allocation failure or an out-of-range configuration).
+fn build_decoder(max_info_bytes: usize) -> Result<CcsdsViterbiDecoder> {
+    CcsdsViterbiDecoder::new(CodeParams::ccsds_r1_2(), max_info_bytes * 8).map_err(|_| {
+        // SR-R7: generic, oracle-free message — no codec-internal config detail is
+        // echoed to a probing attacker.
+        CryptoError::ErrorCorrection("forward error correction failed".into())
+    })
 }
 
 /// Reconstructs the per-chunk coded-body lengths from the total framed body
@@ -222,6 +246,22 @@ mod tests {
     /// Ceil-div `a / b` (manual — MSRV 1.70, `div_ceil` is 1.73+).
     fn ceil_div(a: usize, b: usize) -> usize {
         (a + b - 1) / b
+    }
+
+    /// L1: the decoder constructor maps a failing configuration to a typed
+    /// `ErrorCorrection` error instead of panicking via `expect` on the decode
+    /// path. An oversized `max_info_bytes` overflows the crate's info-bit cap and
+    /// exercises the mapping (OOM `AllocationFailed` is the real-world trigger but
+    /// is not reachable deterministically in a test).
+    #[test]
+    fn test_l1_decoder_constructor_error_maps_to_error_correction() {
+        // MAX_SUPPORTED_INFO_BITS = 1_000_000 bits = 125_000 bytes; one more byte
+        // overflows the cap, so the constructor errors instead of building.
+        let oversized = 125_000 + 1;
+        assert!(matches!(
+            super::build_decoder(oversized),
+            Err(CryptoError::ErrorCorrection(_))
+        ));
     }
 
     /// P0-3: the single-chunk termination relation `enc.len() == 2L + 2` holds
