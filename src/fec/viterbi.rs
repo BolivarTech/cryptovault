@@ -249,7 +249,7 @@ mod tests {
     };
     use viterbi::{CodeParams, ViterbiEncoder};
 
-    /// Ceil-div `a / b` (manual — MSRV 1.70, `div_ceil` is 1.73+).
+    /// Ceil-div `a / b` (manual const-safe form; `div_ceil` is not `const fn`).
     fn ceil_div(a: usize, b: usize) -> usize {
         (a + b - 1) / b
     }

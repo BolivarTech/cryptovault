@@ -175,7 +175,7 @@ assert_eq!(&*unwrapped, &*dek);
 
 ## MSRV
 
-Rust **1.70** or newer.
+Rust **1.85** or newer.
 
 ## License
 

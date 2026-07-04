@@ -64,7 +64,7 @@ Status legend: **OPEN** · **FIXED** · **DOC** (documented/accepted) · **DEFER
 | **L2** | Fixed ~11 MB decoder scratch per call → ~16,000× memory amplification for tiny blobs | `src/fec/viterbi.rs` | Size `max_info_bits` to `8·min(VITERBI_CHUNK, actual max body)` (or reuse one decoder). | FIXED |
 | **L3** | `HANDOFF.md` (internal `magi-rs` brief) ships in the published crate | `Cargo.toml` `exclude` | Add `HANDOFF.md` (and `tests/ber_provisional.rs`) to `exclude`. | **FIXED** (0.2.0) |
 | **L4** | `pub mod blob` exposes forgeable wire plumbing (`encode_blob`/`decode_blob`/`validate_pre_fec`) | `src/lib.rs`, `src/blob.rs` | Make `blob` `pub(crate)` (minimize attack surface); blob-crafted integration tests migrated to `src/blob.rs` unit tests, remainder rewritten against the public API (all SC-1..8 still covered). Breaking → 0.2.0. | **FIXED** (0.2.0) |
-| **L5** | No MSRV CI job (1.70 declared, unverified) | `.github/workflows/ci.yml` | Add an MSRV job (`dtolnay/rust-toolchain@1.70` + `cargo check`). | **FIXED** (0.2.0) — `msrv` job (`@1.70` + `cargo check --all-targets`) added to `ci.yml`. |
+| **L5** | No MSRV CI job (declared MSRV unverified) | `.github/workflows/ci.yml` | Add an MSRV job. | **FIXED** (0.2.0) — `msrv` job added; it surfaced that the current RustCrypto stack (`zeroize` 1.9, `base64ct` 1.8.3) moved to **edition 2024**, so the honest MSRV was bumped 1.70 → **1.85** (`rust-version` + README + `@1.85` + `cargo check --all-targets --all-features`). |
 | **L6** | Passphrase accepted as plain `&str` (no `secrecy::SecretString`) | `src/vault.rs` `derive_key` | SHOULD item; host-memory compromise is out of the threat model. Documented as an accepted limitation for 0.x (adding `secrecy` is unjustified surface per minimize-attack-surface). | DOC |
 | **L7** | `CsprngLayer::new` takes the seed by value (un-zeroized array copy) | `src/fec/interleaver.rs` | Accept `&[u8]`/`&Zeroizing<..>` and copy internally into the `Zeroizing` field. | FIXED |
 | **L8** | `zeroize` features not enabled on `aes-gcm-siv`/`chacha20`/`argon2` | `Cargo.toml` | Enable the optional `zeroize` feature where available (wipes cipher/HKDF/Argon2 transient state). | **FIXED** (0.2.0) — `chacha20` enabled; `argon2` already enabled (M2, Batch A); `aes-gcm-siv` 0.11 exposes **no** `zeroize` feature (verified via `cargo add --dry-run`; the AES key schedule already zeroizes on drop), so nothing to enable there. |
@@ -114,7 +114,7 @@ API/packaging; C: CI/docs). Final status of every finding:
 |-------|----------|
 | A (crypto/security, TDD) | M1, M2, M3-cap, L1, L2, L7, N2 |
 | B (API/packaging) | H1, M5, L4, L3, L8, L9, N1, version → 0.2.0 |
-| C (CI/docs) | **M4** (doctest step in both workflows), **L5** (MSRV 1.70 job), **M3-docs** (decrypt-path CPU-DoS docs), **L11** (extended RS/Viterbi KAT corpus), **L12** (`with_csprng_from_master` helper), **L13** (docs.rs link repoint), **N3** (README numbers → qualitative + badge), **N4** (direct-codec no-cap notes) |
+| C (CI/docs) | **M4** (doctest step in both workflows), **L5** (MSRV 1.85 job), **M3-docs** (decrypt-path CPU-DoS docs), **L11** (extended RS/Viterbi KAT corpus), **L12** (`with_csprng_from_master` helper), **L13** (docs.rs link repoint), **N3** (README numbers → qualitative + badge), **N4** (direct-codec no-cap notes) |
 
 With M3-cap (A) + M3-docs (C), **M3 is now fully FIXED**.
 

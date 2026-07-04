@@ -33,19 +33,14 @@ jobs:
         run: cargo test --doc --all-features
 
   msrv:
-    name: msrv (1.70)
+    name: msrv (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.70
+      - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-hack
-      # MSRV 1.70 is the LIBRARY floor (what consumers need). The crate's own
-      # dev-deps (proptest → tempfile → getrandom 0.4, edition 2024) require a
-      # newer Cargo to resolve, so `--no-dev-deps` strips them: the library and
-      # its normal deps (getrandom 0.2) build cleanly on 1.70.
-      - name: cargo check (MSRV, library only)
-        run: cargo hack check --no-dev-deps --all-features
+      - name: cargo check (MSRV)
+        run: cargo check --all-targets --all-features
 
   clippy:
     name: clippy

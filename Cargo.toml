@@ -2,7 +2,7 @@
 name = "cryptovault"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.85"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Authenticated encryption resilient over interference channels: AES-256-GCM-SIV over Argon2id/HKDF, followed by a concatenated Reed-Solomon + interleaver + Viterbi FEC."
 license = "MIT OR Apache-2.0"
@@ -36,9 +36,7 @@ sha2 = "0.10"
 # `zeroize` feature (L8): wipes the ChaCha20 keystream/block state on drop.
 chacha20 = { version = "0.9", features = ["zeroize"] }        # CSPRNG interleaver keystream (Task 8).
 subtle = "2"            # constant-time secret/tag comparison.
-# `~1.8` (>=1.8.0, <1.9.0): zeroize 1.9 moved to edition 2024 (needs Rust 1.85);
-# this keeps the library MSRV at 1.70. 1.8.x is current and fully functional.
-zeroize = "~1.8"
+zeroize = "1.9"
 rand = "0.8"
 base64 = "0.22"
 # FEC — BolivarTech's own crates (not security primitives): RS(255,223) + K=7 R=1/2 Viterbi.
