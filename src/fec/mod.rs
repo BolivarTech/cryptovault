@@ -190,6 +190,15 @@ impl ConcatenatedFec {
     /// [`CryptoError::InvalidInput`] if `depth` is out of range;
     /// [`CryptoError::KeyDerivation`] if HKDF seed expansion fails.
     pub fn with_csprng_from_master(master: &[u8], depth: usize) -> Result<Self> {
+        // L12 / M1-class: reject a wrong-length master up front. HKDF accepts
+        // any-length IKM, so without this check a malformed master would be
+        // silently expanded into a seed — mirror the byte-core `KEY_LEN` guard.
+        if master.len() != crate::KEY_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "master key must be exactly {} bytes",
+                crate::KEY_LEN
+            )));
+        }
         let seed = crate::kdf::expand_interleaver_seed(master)?;
         let block = BlockInterleaver::new(depth)?;
         let csprng = CsprngLayer::new(&seed)?;
