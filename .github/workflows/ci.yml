@@ -29,6 +29,18 @@ jobs:
           tool: cargo-nextest
       - name: cargo nextest run
         run: cargo nextest run --all-features
+      - name: cargo test --doc
+        run: cargo test --doc --all-features
+
+  msrv:
+    name: msrv (1.70)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.70
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (MSRV)
+        run: cargo check --all-targets --all-features
 
   clippy:
     name: clippy

@@ -39,6 +39,8 @@ jobs:
         run: cargo clippy --all-features --tests -- -D warnings
       - name: cargo nextest run
         run: cargo nextest run --all-features
+      - name: cargo test --doc
+        run: cargo test --doc --all-features
       - name: cargo doc --no-deps
         run: cargo doc --no-deps --all-features
       - name: cargo audit
