@@ -9,7 +9,7 @@
 //! purpose-specific sub-keys (SR-C3) — the interleaver seed is never the raw
 //! AEAD key. All secret material is returned in [`Zeroizing`] buffers.
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -84,10 +84,19 @@ pub fn owasp_params() -> Params {
 
 impl KeyDerivation for Argon2Kdf {
     fn derive_master(&self, password: &[u8], salt: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, owasp_params());
+        let params = owasp_params();
+        let block_count = params.block_count();
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        // M2: own the ~64 MiB Argon2 working memory so it is wiped on drop. The
+        // `argon2` crate otherwise frees this block buffer **unwiped** — its
+        // final-column blocks are key-equivalent, so master-reconstructable
+        // material would persist in freed heap. The `zeroize` feature makes
+        // `Block: Zeroize`, so this `Zeroizing<Vec<Block>>` zeroizes every block
+        // on drop (including on the error path below).
+        let mut blocks = Zeroizing::new(vec![Block::default(); block_count]);
         let mut master = Zeroizing::new(vec![0u8; KEY_LEN]);
         argon2
-            .hash_password_into(password, salt, &mut master)
+            .hash_password_into_with_memory(password, salt, &mut master, blocks.as_mut_slice())
             .map_err(|e| CryptoError::KeyDerivation(format!("Argon2id derivation failed: {e}")))?;
         Ok(master)
     }

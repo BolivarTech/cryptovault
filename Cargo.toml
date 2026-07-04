@@ -23,7 +23,9 @@ exclude = [
 [dependencies]
 # Authenticated encryption + KDF (vetted RustCrypto primitives — not rolled here).
 aes-gcm-siv = "0.11"
-argon2 = "0.5"
+# `zeroize` feature (M2): wipes Argon2's internal transient state and lets us hold
+# the 64 MiB working-memory block buffer in a drop-wiped `Zeroizing<Vec<Block>>`.
+argon2 = { version = "0.5", features = ["zeroize"] }
 hkdf = "0.12"
 sha2 = "0.10"
 chacha20 = "0.9"        # CSPRNG interleaver keystream (Task 8).
