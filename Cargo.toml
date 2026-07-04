@@ -2,7 +2,7 @@
 name = "cryptovault"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.96"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Authenticated encryption resilient over interference channels: AES-256-GCM-SIV over Argon2id/HKDF, followed by a concatenated Reed-Solomon + interleaver + Viterbi FEC."
 license = "MIT OR Apache-2.0"
