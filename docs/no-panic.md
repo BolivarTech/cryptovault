@@ -12,7 +12,7 @@ SR-R5 under **both** `panic="unwind"` and `panic="abort"` — no reliance on
 `catch_unwind`.
 
 > Scope: `#![forbid(unsafe_code)]` holds crate-wide, and both FEC crates
-> (`reedsolomon` 0.1.0, `viterbi` 0.0.1) are pure-Rust `forbid(unsafe)`, so the
+> (`reedsolomon` 0.2.0, `viterbi` 0.1.0) are pure-Rust `forbid(unsafe)`, so the
 > boundary risk is **panic-only, never UB**. This table is the artifact Task 25's
 > external reviewer audits line-by-line.
 

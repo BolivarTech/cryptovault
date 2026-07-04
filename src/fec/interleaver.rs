@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.0
+// Version: 0.2.1
 // Date: 2026-07-03
 //! Interleaving stage of the concatenated FEC (SR-F2, P0-1, P0-2).
 //!

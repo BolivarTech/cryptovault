@@ -1,6 +1,6 @@
 [package]
 name = "cryptovault"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.96"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
@@ -43,8 +43,8 @@ base64 = "0.22"
 # Exact-version pins: the concatenated wire format is locked to these codec
 # releases, so a minor-version bump must be an explicit, reviewed change — never
 # an accidental drift that could alter bit-packing/framing.
-reedsolomon = "=0.1.0"
-viterbi = "=0.0.1"
+reedsolomon = "=0.2.0"
+viterbi = "=0.1.0"
 
 [dev-dependencies]
 proptest = "1"          # property-based no-panic / round-trip coverage (SR-R5).

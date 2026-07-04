@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.0
+// Version: 0.2.1
 // Date: 2026-07-03
 //! Task 22 — Known-Answer Tests (SR-F5): fixed vectors asserting **exact bytes**.
 //!

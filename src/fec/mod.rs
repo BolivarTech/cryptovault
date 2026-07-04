@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.0
+// Version: 0.2.1
 // Date: 2026-07-03
 //! Forward error correction: the [`ErrorCorrection`] strategy trait and the
 //! concatenated FEC stack composing Reed-Solomon, interleaving, and Viterbi

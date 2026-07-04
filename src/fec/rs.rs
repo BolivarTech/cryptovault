@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.0
+// Version: 0.2.1
 // Date: 2026-07-03
 //! Reed-Solomon outer FEC: the [`ReedSolomonCodec`] strategy over the author's
 //! own `reedsolomon` 0.1.0 crate — RS(255, 223) / CCSDS over GF(2^8) (SR-F1).

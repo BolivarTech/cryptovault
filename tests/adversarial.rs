@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.0
+// Version: 0.2.1
 // Date: 2026-07-03
 //! Task 20c — adversarial corpus (CERTIFICATION BAR, SR-R3 / SR-R4 / SR-R5 / SR-R6).
 //!
