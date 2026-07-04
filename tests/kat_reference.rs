@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
+// Version: 0.2.0
 // Date: 2026-07-03
 //! Task 0b — FEC de-risk: independent-reference KATs + early probes.
 //!

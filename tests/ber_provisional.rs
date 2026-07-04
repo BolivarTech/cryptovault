@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 2.0.0
+// Version: 0.2.0
 // Date: 2026-07-03
 //! Preliminary bit-error-rate (BER) pass for the outer FEC (RS + interleaver) —
 //! Phase-4 close, spec SR-F6.
