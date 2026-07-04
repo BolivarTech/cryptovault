@@ -22,6 +22,18 @@ use crate::{
     SALT_LEN,
 };
 
+/// AAD purpose label for the **data path** (`encrypt_bytes` / `encrypt_with_key`
+/// / `decrypt_with_key`) — the first AAD byte (L9).
+///
+/// Domain-separates data-path blobs from envelope-path blobs so the two front
+/// doors are **not cross-decryptable**, even under a matching key and empty
+/// salt. The label is bound as AAD only (never stored in the blob).
+const AAD_PURPOSE_DATA: u8 = 0x01;
+
+/// AAD purpose label for the **envelope path** (`wrap_key` / `unwrap_key` /
+/// `rewrap`) — the first AAD byte (L9). See [`AAD_PURPOSE_DATA`].
+const AAD_PURPOSE_ENVELOPE: u8 = 0x02;
+
 /// Generates a fresh per-context Argon2 salt: [`crate::SALT_LEN`] random bytes
 /// from the operating-system CSPRNG (`OsRng`), in a [`Zeroizing`] buffer
 /// (SR-C6).
@@ -323,7 +335,7 @@ impl CryptoVault {
     // envelope (Task 18) front doors. Delegates to the AAD-extending variant
     // with no extra AAD (the non-envelope path binds the header only).
     fn encrypt_bytes(&self, master: &[u8], pt: &[u8]) -> Result<String> {
-        self.encrypt_bytes_aad(master, pt, &[])
+        self.encrypt_bytes_aad(master, pt, AAD_PURPOSE_DATA, &[])
     }
 
     /// Encrypts `pt` binding `header ‖ aad_extra` as the AEAD AAD — the shared
@@ -334,7 +346,8 @@ impl CryptoVault {
     ///
     /// Pipeline: bound the plaintext size (SR-R4) → HKDF-expand the AEAD sub-key
     /// (SR-C3) → sample a fresh nonce (SR-C1) → AES-256-GCM-SIV encrypt with
-    /// `version ‖ plaintext_len ‖ aad_extra` bound as **AAD** (SR-C4) → wrap
+    /// `purpose ‖ version ‖ plaintext_len ‖ aad_extra` bound as **AAD** (L9 domain
+    /// separation + SR-C4) → wrap
     /// `nonce ‖ ciphertext ‖ tag` in the FEC envelope (header also *inside* the
     /// FEC, SR-R1) → base64. `aad_extra` is authenticated but **never stored** in
     /// the blob (the salt stays caller-managed, out of band).
@@ -343,7 +356,13 @@ impl CryptoVault {
     /// [`CryptoError::InvalidInput`] if `pt` exceeds the plaintext cap;
     /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
     /// nonce sampling or AEAD failure.
-    fn encrypt_bytes_aad(&self, master: &[u8], pt: &[u8], aad_extra: &[u8]) -> Result<String> {
+    fn encrypt_bytes_aad(
+        &self,
+        master: &[u8],
+        pt: &[u8],
+        purpose: u8,
+        aad_extra: &[u8],
+    ) -> Result<String> {
         // M1: reject a wrong-length master before any work. HKDF accepts
         // any-length IKM, so without this an empty/truncated key would silently
         // produce a valid blob under a key derivable from nothing — one check
@@ -368,8 +387,9 @@ impl CryptoVault {
         // encode_blob, also the first bytes of the FEC-protected payload (SR-R1).
         let plaintext_len = pt.len() as u32;
         let header = Self::build_header(plaintext_len);
-        // AAD = header ‖ aad_extra (SR-C4 header binding + SR-C5 salt binding).
-        let aad = Self::build_aad(&header, aad_extra);
+        // AAD = purpose ‖ header ‖ aad_extra (L9 domain separation + SR-C4 header
+        // binding + SR-C5 salt binding).
+        let aad = Self::build_aad(purpose, &header, aad_extra);
         // SR-C4/C5: encrypt with the header (+ optional salt) bound as AAD.
         let ct = self.cipher.encrypt(&aead_key, &nonce, &aad, pt)?;
         // body = nonce ‖ ciphertext ‖ tag.
@@ -390,10 +410,16 @@ impl CryptoVault {
         header
     }
 
-    /// Concatenates the header and any extra AAD (the per-context salt) into the
-    /// AEAD additional-authenticated-data buffer (DRY: shared by encrypt/decrypt).
-    fn build_aad(header: &[u8; HEADER_LEN], aad_extra: &[u8]) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(HEADER_LEN + aad_extra.len());
+    /// Concatenates the purpose label, header, and any extra AAD (the per-context
+    /// salt) into the AEAD additional-authenticated-data buffer (DRY: shared by
+    /// encrypt/decrypt).
+    ///
+    /// The leading `purpose` byte (L9) domain-separates the data path from the
+    /// envelope path so their blobs are not cross-decryptable under a matching key
+    /// and empty salt.
+    fn build_aad(purpose: u8, header: &[u8; HEADER_LEN], aad_extra: &[u8]) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(1 + HEADER_LEN + aad_extra.len());
+        aad.push(purpose);
         aad.extend_from_slice(header);
         aad.extend_from_slice(aad_extra);
         aad
@@ -426,7 +452,7 @@ impl CryptoVault {
     // Byte core: see `encrypt_bytes`. Delegates to the AAD-extending variant
     // with no extra AAD (the non-envelope path binds the header only).
     fn decrypt_bytes(&self, master: &[u8], b64: &str) -> Result<Zeroizing<Vec<u8>>> {
-        self.decrypt_bytes_aad(master, b64, &[])
+        self.decrypt_bytes_aad(master, b64, AAD_PURPOSE_DATA, &[])
     }
 
     /// Decrypts a base64 blob binding `recovered_header ‖ aad_extra` as the AEAD
@@ -451,6 +477,7 @@ impl CryptoVault {
         &self,
         master: &[u8],
         b64: &str,
+        purpose: u8,
         aad_extra: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>> {
         // M1: reject a wrong-length master before any work (mirrors the encrypt
@@ -488,7 +515,7 @@ impl CryptoVault {
         // (4) SR-R6: reconstruct the AAD from the *error-corrected* header
         // (+ the caller-supplied salt for the envelope path, SR-C5).
         let header = Self::build_header(plaintext_len);
-        let aad = Self::build_aad(&header, aad_extra);
+        let aad = Self::build_aad(purpose, &header, aad_extra);
         // body = nonce ‖ ciphertext ‖ tag. `decode_blob` guarantees
         // body.len() >= NONCE_LEN + TAG_LEN, but guard so no slice can panic.
         if body.len() < NONCE_LEN {
@@ -617,7 +644,7 @@ impl CryptoVault {
     /// [`CryptoError::KeyDerivation`] on HKDF failure; [`CryptoError::Cipher`] on
     /// nonce sampling or AEAD failure.
     pub fn wrap_key(&self, kek: &[u8], salt: &[u8], key_material: &[u8]) -> Result<String> {
-        self.encrypt_bytes_aad(kek, key_material, salt)
+        self.encrypt_bytes_aad(kek, key_material, AAD_PURPOSE_ENVELOPE, salt)
     }
 
     /// Unwraps a base64 envelope blob produced by [`wrap_key`](Self::wrap_key),
@@ -644,7 +671,7 @@ impl CryptoVault {
     /// [`CryptoError::Cipher`] if the AEAD tag fails (wrong KEK or salt) — **no
     /// key material is revealed**. **Never panics** on adversarial input.
     pub fn unwrap_key(&self, kek: &[u8], salt: &[u8], wrapped: &str) -> Result<Zeroizing<Vec<u8>>> {
-        self.decrypt_bytes_aad(kek, wrapped, salt)
+        self.decrypt_bytes_aad(kek, wrapped, AAD_PURPOSE_ENVELOPE, salt)
     }
 
     /// Re-wraps a salt-bound DEK from an old `(kek, salt)` context to a new one,
@@ -680,9 +707,9 @@ impl CryptoVault {
     ) -> Result<String> {
         // Unwrap under the old context (old_salt bound as AAD); a wrong old
         // context fails the tag here, before any re-wrap. The DEK is Zeroizing.
-        let dek = self.decrypt_bytes_aad(old_kek, blob, old_salt)?;
+        let dek = self.decrypt_bytes_aad(old_kek, blob, AAD_PURPOSE_ENVELOPE, old_salt)?;
         // Re-wrap the recovered DEK under the new context (new_salt as AAD).
-        self.encrypt_bytes_aad(new_kek, &dek, new_salt)
+        self.encrypt_bytes_aad(new_kek, &dek, AAD_PURPOSE_ENVELOPE, new_salt)
     }
 }
 
@@ -918,6 +945,32 @@ mod envelope_tests {
         let salt = [5u8; SALT_LEN];
         let wrapped = v.wrap_key(&kek, &salt, b"").unwrap();
         assert!(v.unwrap_key(&kek, &salt, &wrapped).unwrap().is_empty());
+    }
+
+    /// L9: the data path and the envelope path bind distinct purpose labels into
+    /// the AAD, so a blob made by `encrypt_with_key` cannot be opened by
+    /// `unwrap_key` (and vice-versa) even under a matching key and empty salt —
+    /// while same-door round-trips still succeed.
+    #[test]
+    fn test_l9_data_and_envelope_blobs_are_not_cross_decryptable() {
+        let v = CryptoVault::default();
+        let key = [0x33u8; KEY_LEN];
+
+        // A data-path blob does not unwrap via the envelope door (empty salt).
+        let data_blob = v.encrypt_with_key(&key, "hello").unwrap();
+        assert!(matches!(
+            v.unwrap_key(&key, &[], &data_blob),
+            Err(CryptoError::Cipher(_))
+        ));
+        // An envelope-path blob does not decrypt via the data door.
+        let env_blob = v.wrap_key(&key, &[], b"hello").unwrap();
+        assert!(matches!(
+            v.decrypt_with_key(&key, &env_blob),
+            Err(CryptoError::Cipher(_))
+        ));
+        // Same-door round-trips still pass.
+        assert_eq!(&**v.decrypt_with_key(&key, &data_blob).unwrap(), "hello");
+        assert_eq!(&*v.unwrap_key(&key, &[], &env_blob).unwrap(), b"hello");
     }
 
     /// SC-5: unwrapping under the wrong KEK fails the AEAD tag with a typed
