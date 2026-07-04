@@ -148,6 +148,57 @@ impl ConcatenatedFec {
     pub fn new(rs: ReedSolomonCodec, il: Interleaver, vt: ViterbiCodec) -> Self {
         Self { rs, il, vt }
     }
+
+    /// Builds a concatenated FEC stack with the **optional CSPRNG obfuscation
+    /// layer** enabled, deriving its interleaver seed from a session `master`
+    /// (L12, SR-C3 / SR-F2).
+    ///
+    /// This is the ergonomic, domain-separation-enforcing path to the
+    /// [`Interleaver::BlockThenCsprng`] variant: it HKDF-expands `master` into the
+    /// `cryptovault:v1:interleaver` sub-key (via
+    /// [`expand_interleaver_seed`](crate::kdf::expand_interleaver_seed)) and wires
+    /// it into a [`CsprngLayer`], so a caller gets the same key hierarchy the vault
+    /// enforces internally — the seed is **never** the raw AEAD key — instead of
+    /// hand-wiring `HKDF → CsprngLayer → Interleaver` themselves. Inject the result
+    /// into [`CryptoVault::new`](crate::vault::CryptoVault::new) as the FEC
+    /// strategy; both encrypt and decrypt sides must build the stack from the
+    /// **same** `master` and `depth` so the permutation matches.
+    ///
+    /// # ⚠️ Opt-in, non-security defense-in-depth
+    ///
+    /// The CSPRNG layer is **obfuscation, not security** (gradation
+    /// `fixed < CSPRNG < AEAD`): confidentiality and integrity come **only** from
+    /// the AEAD applied first. Enabling it also **weakens** the deterministic block
+    /// interleaver's worst-case burst-spreading guarantee (quantified in
+    /// `docs/interleaver-csprng-degradation.md`) and introduces the DC-1
+    /// static-per-key-permutation limitation (crate-level docs). Prefer the default
+    /// [`ConcatenatedFec::default`] (block-only) unless you have a concrete reason
+    /// for the extra obfuscation.
+    ///
+    /// # Parameters
+    /// - `master`: the session master from
+    ///   [`derive_key`](crate::vault::CryptoVault::derive_key) — HKDF-expanded here
+    ///   into the interleaver seed (never used as a raw AEAD/interleaver key).
+    /// - `depth`: the block-interleaver depth `I` (codewords per window;
+    ///   `1 ≤ depth ≤ `[`RS_INTERLEAVE_MAX`](crate::RS_INTERLEAVE_MAX)).
+    ///
+    /// # Returns
+    /// A [`ConcatenatedFec`] whose interleaver is `BlockThenCsprng` seeded by
+    /// `master`.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `depth` is out of range;
+    /// [`CryptoError::KeyDerivation`] if HKDF seed expansion fails.
+    pub fn with_csprng_from_master(master: &[u8], depth: usize) -> Result<Self> {
+        let seed = crate::kdf::expand_interleaver_seed(master)?;
+        let block = BlockInterleaver::new(depth)?;
+        let csprng = CsprngLayer::new(&seed)?;
+        Ok(Self::new(
+            ReedSolomonCodec,
+            Interleaver::BlockThenCsprng(block, csprng),
+            ViterbiCodec,
+        ))
+    }
 }
 
 impl Default for ConcatenatedFec {
@@ -272,6 +323,44 @@ mod concatenated_tests {
             payload,
             "a within-capacity burst is corrected, payload recovered exactly"
         );
+    }
+
+    /// L12 / SR-F2: the ergonomic `ConcatenatedFec::with_csprng_from_master`
+    /// constructor (optional CSPRNG obfuscation layer, HKDF-seeded from a master
+    /// with vault-enforced domain separation) produces a working, reversible FEC
+    /// that round-trips through a `CryptoVault::new(.., .., Box::new(fec))`; an
+    /// out-of-range depth is rejected before any wiring.
+    #[test]
+    fn test_l12_csprng_from_master_fec_roundtrips_via_vault() {
+        use crate::cipher::Aes256GcmSivCipher;
+        use crate::error::CryptoError;
+        use crate::kdf::Argon2Kdf;
+        use crate::vault::CryptoVault;
+        use crate::{KEY_LEN, SALT_LEN};
+
+        // A master used to seed the interleaver (HKDF-derived internally).
+        let seed_master = CryptoVault::default()
+            .derive_key("interleaver-master", &[0u8; SALT_LEN])
+            .unwrap();
+        let fec = ConcatenatedFec::with_csprng_from_master(&seed_master, 5).unwrap();
+        let vault = CryptoVault::new(
+            Box::new(Argon2Kdf),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(fec),
+        );
+
+        let key = [0x7Bu8; KEY_LEN];
+        let blob = vault
+            .encrypt_with_key(&key, "obfuscated over a noisy channel")
+            .unwrap();
+        let recovered = vault.decrypt_with_key(&key, &blob).unwrap();
+        assert_eq!(&**recovered, "obfuscated over a noisy channel");
+
+        // An out-of-range depth is rejected before any wiring.
+        assert!(matches!(
+            ConcatenatedFec::with_csprng_from_master(&seed_master, 0),
+            Err(CryptoError::InvalidInput(_))
+        ));
     }
 
     /// SR-F4 / SC-3: corruption beyond the concatenated code's capacity yields a
