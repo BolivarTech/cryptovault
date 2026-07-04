@@ -18,6 +18,11 @@ exclude = [
     "run-tests.py",
     "VITERBI_CRATE_SPEC.md",
     ".github/",
+    # Internal magi-rs hardening brief (L3) — not part of the published crate.
+    "HANDOFF.md",
+    # Superseded provisional RS-only BER pass (L3); the finalized analysis lives
+    # in tests/ber_analysis.rs.
+    "tests/ber_provisional.rs",
 ]
 
 [dependencies]
@@ -28,7 +33,8 @@ aes-gcm-siv = "0.11"
 argon2 = { version = "0.5", features = ["zeroize"] }
 hkdf = "0.12"
 sha2 = "0.10"
-chacha20 = "0.9"        # CSPRNG interleaver keystream (Task 8).
+# `zeroize` feature (L8): wipes the ChaCha20 keystream/block state on drop.
+chacha20 = { version = "0.9", features = ["zeroize"] }        # CSPRNG interleaver keystream (Task 8).
 subtle = "2"            # constant-time secret/tag comparison.
 zeroize = "1.8"
 rand = "0.8"
