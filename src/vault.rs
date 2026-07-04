@@ -489,11 +489,12 @@ impl CryptoVault {
             )));
         }
         // (1) SR-R4: cap the base64 length BEFORE base64-decode allocates.
+        // N2/SR-R7: a fixed, generic message — the attacker's own input length is
+        // never echoed back on the decode path.
         if b64.len() > MAX_B64_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "base64 input length {} exceeds MAX_B64_LEN ({MAX_B64_LEN})",
-                b64.len()
-            )));
+            return Err(CryptoError::InvalidInput(
+                "input exceeds maximum size".into(),
+            ));
         }
         // (2) Strict base64 decode — the STANDARD engine rejects a bad alphabet,
         // non-canonical padding, and trailing bits.
@@ -519,10 +520,10 @@ impl CryptoVault {
         // body = nonce ‖ ciphertext ‖ tag. `decode_blob` guarantees
         // body.len() >= NONCE_LEN + TAG_LEN, but guard so no slice can panic.
         if body.len() < NONCE_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "recovered body {} shorter than a {NONCE_LEN}-byte nonce",
-                body.len()
-            )));
+            // N2/SR-R7: fixed, generic message (this guard is statically
+            // unreachable — `decode_blob` guarantees the body length — but keep the
+            // message oracle-free for full decode-path consistency).
+            return Err(CryptoError::InvalidInput("malformed blob".into()));
         }
         let (nonce, ct) = body.split_at(NONCE_LEN);
         // (5) SR-C3/C4/C8: HKDF the AEAD key, open with the recovered header (+
@@ -1188,6 +1189,20 @@ mod byte_core_tests {
             v.decrypt_bytes(&[0u8; KEY_LEN], &giant),
             Err(CryptoError::InvalidInput(_))
         ));
+    }
+
+    /// N2 (SR-R7): the pre-cap base64-length rejection uses a fixed, generic
+    /// message that does not echo the attacker's own input length back.
+    #[test]
+    fn test_n2_giant_base64_rejection_message_is_generic() {
+        let v = CryptoVault::default();
+        let giant = "A".repeat(MAX_B64_LEN + 1);
+        match v.decrypt_bytes(&[0u8; KEY_LEN], &giant) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert_eq!(msg, "input exceeds maximum size");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     /// SR-F6 / SC-6: non-canonical base64 (bad alphabet) is rejected with an
