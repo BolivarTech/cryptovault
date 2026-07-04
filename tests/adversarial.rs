@@ -239,6 +239,32 @@ fn test_sr_r7_decode_errors_carry_no_structural_detail() {
             );
         }
     }
+    // Malformed base64 (bad alphabet, bad padding, trailing bits): the strict
+    // STANDARD engine rejects each, but the crate's error MUST NOT echo the
+    // base64 library's interpolated byte-index / offset detail — same fixed,
+    // generic message contract as the FEC decode path above.
+    let bad_base64: [&str; 3] = [
+        "@@@@",    // bad alphabet — '@' outside the standard base64 set
+        "YWJjZA=", // bad padding — length 7 with a stray pad
+        "AB==",    // trailing bits — 'B' carries non-zero discarded bits
+    ];
+    for b64 in bad_base64 {
+        let err = vault
+            .unwrap_key(&MASTER, &[], b64)
+            .expect_err("a malformed base64 input must be rejected");
+        let msg = err.to_string();
+        let lower = msg.to_lowercase();
+        assert!(
+            !msg.chars().any(|c| c.is_ascii_digit()),
+            "base64 decode error must not embed any byte-index/offset digit, got: {msg}"
+        );
+        for banned in BANNED_WORDS {
+            assert!(
+                !lower.contains(banned),
+                "base64 decode error must not leak internal term '{banned}', got: {msg}"
+            );
+        }
+    }
 }
 
 /// SR-R4: the off-by-one boundary — a decoded blob of exactly `MAX_BLOB_LEN + 1`
