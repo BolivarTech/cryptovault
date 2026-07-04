@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 2.0.0
+// Version: 0.2.0
 // Date: 2026-07-03
 //! Viterbi inner FEC: the [`ViterbiCodec`] wrapper over the author's own
 //! `viterbi` 0.0.1 crate — CCSDS `K=7, R=1/2` hard-decision convolutional code

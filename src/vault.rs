@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 2.0.0
+// Version: 0.2.0
 // Date: 2026-07-03
 //! Public facade: the `CryptoVault` composing the three strategy traits, plus
 //! envelope key-wrapping and generation helpers (implemented in Tasks 15+,

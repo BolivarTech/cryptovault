@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 2.0.0
+// Version: 0.2.0
 // Date: 2026-07-03
 //! Authenticated cipher: the `AuthenticatedCipher` trait and the
 //! `Aes256GcmSivCipher` AEAD with AAD binding (SR-C1 / SR-C4).
