@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.2.1
+// Version: 0.2.2
 // Date: 2026-07-03
 //! Task 20d — cross-cutting invariants (CERTIFICATION BAR).
 //!

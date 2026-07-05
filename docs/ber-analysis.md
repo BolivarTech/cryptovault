@@ -23,7 +23,7 @@ several `≤128 KiB` blobs**, each failing or recovering independently.
 
 - **Pipeline under test:** the full concatenated FEC
   `Viterbi(interleave(RS(·)))` — hard-decision Viterbi (CCSDS K=7, R=1/2, own
-  `viterbi` 0.1.0) as the inner code, a depth-5 deterministic block interleaver,
+  `viterbi` 0.2.0) as the inner code, a depth-5 deterministic block interleaver,
   and RS(255,223) (own `reedsolomon` 0.2.0) as the outer code.
 - **Channel:** a memoryless **binary-symmetric channel (BSC)** flipping each
   coded bit independently with probability `BER`.
