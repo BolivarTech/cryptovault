@@ -154,17 +154,30 @@ let unwrapped = vault.unwrap_key(&kek, &salt, &wrapped).unwrap();
 assert_eq!(&*unwrapped, &*dek);
 ```
 
-### AEAD-only (no FEC) or a custom FEC strategy
+### Selecting the FEC strategy
 
 The error-correction layer is an **injectable strategy** (`ErrorCorrection`).
-`CryptoVault::default()` wires the concatenated FEC; `CryptoVault::new(...)` accepts
-any strategy. If you only need the **authenticated encryption** — your transport is
-already reliable, or you want to bypass the FEC to isolate a codec issue — inject
-`NoFec`, an identity codec. Confidentiality and integrity are **fully preserved** (they
-come only from the AEAD, applied first); *only* channel resilience is dropped.
+`CryptoVault::default()` wires the full concatenated stack (RS → interleaver → Viterbi);
+`CryptoVault::new(...)` accepts any strategy, so you can drop the FEC, keep a single
+stage, or plug your own codec. Confidentiality and integrity are **unaffected** — they
+come only from the AEAD, applied first; the FEC choice changes only channel resilience.
 
-> A `NoFec` blob is **not** interchangeable with a default (FEC-protected) blob — the
-> wire format differs, so decode with the same strategy you encoded with.
+| Configuration | Strategy to inject |
+|---|---|
+| Concatenated (default) | `CryptoVault::default()` / `ConcatenatedFec` |
+| AEAD-only (no FEC) | `NoFec` |
+| Reed-Solomon only | `fec::ReedSolomonCodec` (already an `ErrorCorrection`) |
+| Viterbi only | a thin adapter over `fec::ViterbiCodec` |
+| Your own codec | any `impl ErrorCorrection` |
+
+> A blob is decodable **only** by the same strategy that produced it — each wire format
+> differs (RS expands ≈1.14×, Viterbi ≈2×, `NoFec` not at all). Decode with the same
+> strategy you encoded with.
+
+#### AEAD-only (no FEC)
+
+Inject `NoFec`, an identity codec: confidentiality and integrity are fully preserved
+(they come only from the AEAD); *only* channel resilience is dropped.
 
 ```rust
 use cryptovault::{CryptoVault, NoFec};
@@ -185,10 +198,75 @@ let recovered = vault.decrypt_with_key(&key, &blob).unwrap();
 assert_eq!(recovered.as_str(), "sk-secret");
 ```
 
-To supply **your own** forward-error-correction, implement the `ErrorCorrection` trait
-(three methods — `encode` adds redundancy, `decode` corrects then truncates to
-`pre_len`, and `validate_pre_fec` caps the received length to bound allocation) and
-inject it the same way:
+#### Reed-Solomon only
+
+`fec::ReedSolomonCodec` already implements `ErrorCorrection`, so inject it directly — no
+wrapper needed (AEAD + `RS(255,223)`, no interleaver or Viterbi):
+
+```rust
+use cryptovault::CryptoVault;
+use cryptovault::fec::ReedSolomonCodec;
+use cryptovault::kdf::Argon2Kdf;
+use cryptovault::cipher::Aes256GcmSivCipher;
+
+let vault = CryptoVault::new(
+    Box::new(Argon2Kdf),
+    Box::new(Aes256GcmSivCipher),
+    Box::new(ReedSolomonCodec),
+);
+let key = vault.derive_key("master-passphrase", &[0u8; 16]).unwrap();
+let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
+assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap().as_str(), "sk-secret");
+```
+
+#### Viterbi only
+
+`fec::ViterbiCodec` is the inner code: it exposes inherent `encode` / `decode` methods
+(its `decode` takes no `pre_len`) rather than the `ErrorCorrection` trait, so wrap it in
+a small adapter that truncates to `pre_len` and caps the received length. *(A first-class
+`ViterbiOnlyFec` strategy is planned for `v0.3.0`; until then, this adapter is the
+supported route.)*
+
+```rust
+use cryptovault::{CryptoVault, ErrorCorrection, CryptoError, Result, MAX_BLOB_LEN};
+use cryptovault::fec::ViterbiCodec;
+use cryptovault::kdf::Argon2Kdf;
+use cryptovault::cipher::Aes256GcmSivCipher;
+
+struct ViterbiOnly;
+
+impl ErrorCorrection for ViterbiOnly {
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        ViterbiCodec.encode(data)
+    }
+    fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
+        let recovered = ViterbiCodec.decode(encoded)?;
+        let end = pre_len.min(recovered.len());
+        Ok(recovered[..end].to_vec())
+    }
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+        if received.len() > MAX_BLOB_LEN {
+            return Err(CryptoError::InvalidInput("input exceeds maximum size".into()));
+        }
+        Ok(received.len())
+    }
+}
+
+let vault = CryptoVault::new(
+    Box::new(Argon2Kdf),
+    Box::new(Aes256GcmSivCipher),
+    Box::new(ViterbiOnly),
+);
+let key = vault.derive_key("master-passphrase", &[0u8; 16]).unwrap();
+let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
+assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap().as_str(), "sk-secret");
+```
+
+#### Your own codec
+
+Implement the `ErrorCorrection` trait (three methods — `encode` adds redundancy,
+`decode` corrects then truncates to `pre_len`, and `validate_pre_fec` caps the received
+length to bound allocation) and inject it the same way:
 
 ```rust
 use cryptovault::{CryptoVault, ErrorCorrection, CryptoError, Result, MAX_BLOB_LEN};
