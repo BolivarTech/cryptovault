@@ -24,6 +24,7 @@ planning/
 /scripts/sleep_signal.py
 claude-usage*.txt
 run-tests.py
+patch_graphify_hooks.py
 
 # Python bytecode/caches from dev scripts
 __pycache__/

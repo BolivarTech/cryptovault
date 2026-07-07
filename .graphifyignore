@@ -1,0 +1,13 @@
+# Graphify ignore (same syntax as .gitignore; .gitignore is also honored).
+# Keeps graphify from re-indexing its own output and build/dev artifacts.
+graphify-out/
+/target
+/fuzz/target
+.git/
+__pycache__/
+*.pyc
+
+# Dev-only tooling (not part of the crate)
+/scripts/
+run-tests.py
+patch_graphify_hooks.py
