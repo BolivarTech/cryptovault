@@ -151,6 +151,71 @@
 //! let unwrapped = vault.unwrap_key(&kek, &salt, &wrapped).unwrap();
 //! assert_eq!(&*unwrapped, &*dek);
 //! ```
+//!
+//! ## AEAD-only (no FEC) or a custom FEC strategy
+//!
+//! The error-correction layer is an injectable strategy ([`ErrorCorrection`]):
+//! [`CryptoVault::default`] wires the concatenated FEC, while [`CryptoVault::new`]
+//! accepts any strategy. If you need **only the authenticated encryption** — a
+//! clean/reliable transport, or bypassing the FEC to isolate a codec issue —
+//! inject [`NoFec`], an identity codec. Confidentiality and integrity are **fully
+//! preserved** (they come only from the AEAD, applied first); *only* channel
+//! resilience is dropped. A `NoFec` blob is **not** interchangeable with a default
+//! (FEC-protected) blob — the wire format differs, so decode with the same strategy
+//! you encoded with.
+//!
+//! ```
+//! use cryptovault::{CryptoVault, NoFec};
+//! use cryptovault::kdf::Argon2Kdf;
+//! use cryptovault::cipher::Aes256GcmSivCipher;
+//!
+//! // AEAD-only: inject NoFec to disable the concatenated FEC stack.
+//! let vault = CryptoVault::new(
+//!     Box::new(Argon2Kdf),
+//!     Box::new(Aes256GcmSivCipher),
+//!     Box::new(NoFec),
+//! );
+//! let salt = [0u8; 16]; // in production: cryptovault::generate_salt()?
+//! let key = vault.derive_key("master-passphrase", &salt).unwrap();
+//! let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
+//! let recovered = vault.decrypt_with_key(&key, &blob).unwrap();
+//! assert_eq!(recovered.as_str(), "sk-secret");
+//! ```
+//!
+//! To supply **your own** forward-error-correction, implement [`ErrorCorrection`]
+//! (three methods — `encode` adds redundancy, `decode` corrects then truncates to
+//! `pre_len`, and `validate_pre_fec` caps the received length to bound allocation)
+//! and inject it the same way:
+//!
+//! ```
+//! use cryptovault::{CryptoVault, ErrorCorrection, CryptoError, Result, MAX_BLOB_LEN};
+//! use cryptovault::kdf::Argon2Kdf;
+//! use cryptovault::cipher::Aes256GcmSivCipher;
+//!
+//! struct MyFec; // replace the bodies with your own error-correcting codec
+//!
+//! impl ErrorCorrection for MyFec {
+//!     fn encode(&self, data: &[u8]) -> Vec<u8> {
+//!         data.to_vec() // add your redundancy here
+//!     }
+//!     fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
+//!         let end = pre_len.min(encoded.len()); // run correction, then truncate
+//!         Ok(encoded[..end].to_vec())
+//!     }
+//!     fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+//!         if received.len() > MAX_BLOB_LEN {
+//!             return Err(CryptoError::InvalidInput("input exceeds maximum size".into()));
+//!         }
+//!         Ok(received.len())
+//!     }
+//! }
+//!
+//! let vault =
+//!     CryptoVault::new(Box::new(Argon2Kdf), Box::new(Aes256GcmSivCipher), Box::new(MyFec));
+//! let key = vault.derive_key("master-passphrase", &[0u8; 16]).unwrap();
+//! let blob = vault.encrypt_with_key(&key, "secret").unwrap();
+//! assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap().as_str(), "secret");
+//! ```
 
 // `blob` is crate-private (L4): it exposes forgeable wire plumbing
 // (`encode_blob` / `decode_blob` / `validate_pre_fec`) that an untrusted caller
