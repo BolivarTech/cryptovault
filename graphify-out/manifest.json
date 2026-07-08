@@ -1,12 +1,12 @@
 {
   ".remember/tmp/last-ndc.ts": {
-    "mtime": 1783279470.4256296,
-    "ast_hash": "4122646086e41ecf7ea2a05b8490af99",
+    "mtime": 1783480159.6496778,
+    "ast_hash": "2aae76085c2fe0aea209677792d8aa39",
     "semantic_hash": ""
   },
   ".remember/tmp/last-save.json": {
-    "mtime": 1783279469.3988616,
-    "ast_hash": "5495841bc0862bdf1ca006393182e9f2",
+    "mtime": 1783480719.405557,
+    "ast_hash": "1e7e8a138740ff92bec4333fdc3e93a9",
     "semantic_hash": ""
   },
   "fuzz/fuzz_targets/decrypt.rs": {
@@ -45,8 +45,8 @@
     "semantic_hash": ""
   },
   "src/fec/mod.rs": {
-    "mtime": 1783245715.39575,
-    "ast_hash": "0b4d6f8162acede13bde735d972a5117",
+    "mtime": 1783481123.4060078,
+    "ast_hash": "0c92dac48250a11d486985bd395a3a42",
     "semantic_hash": ""
   },
   "src/fec/rs.rs": {
@@ -55,8 +55,8 @@
     "semantic_hash": ""
   },
   "src/fec/viterbi.rs": {
-    "mtime": 1783245715.4267461,
-    "ast_hash": "c5c60fdc1a60c9e7340dec11e7a41315",
+    "mtime": 1783481123.4070094,
+    "ast_hash": "a075302e215e71e342499672cc20da63",
     "semantic_hash": ""
   },
   "src/kdf.rs": {
@@ -65,8 +65,8 @@
     "semantic_hash": ""
   },
   "src/lib.rs": {
-    "mtime": 1783245715.4602728,
-    "ast_hash": "11e1363ebbadb733df73566a55f23139",
+    "mtime": 1783481123.4080071,
+    "ast_hash": "ecb61afadb4fba26b1f5ff99de81e3cd",
     "semantic_hash": ""
   },
   "src/vault.rs": {
@@ -130,23 +130,23 @@
     "semantic_hash": ""
   },
   ".remember/archive.md": {
-    "mtime": 1783245268.3735158,
-    "ast_hash": "231af47cdb1c51e1697bcfa8d8744f00",
+    "mtime": 1783454171.582844,
+    "ast_hash": "c2acf535587f3e1aac0381c685b0d746",
     "semantic_hash": ""
   },
   ".remember/now.md": {
-    "mtime": 1783279487.2100742,
-    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "mtime": 1783480719.1870067,
+    "ast_hash": "dbc8b2e43efdaaee30b6eb35f08cddff",
     "semantic_hash": ""
   },
   ".remember/recent.md": {
-    "mtime": 1783245268.3059735,
-    "ast_hash": "ff4a64e53ca54dd0eed20f0d8a611105",
+    "mtime": 1783454171.5558422,
+    "ast_hash": "52435b8ed0a4b2ebcaa37b480a8e9c41",
     "semantic_hash": ""
   },
   ".remember/remember.md": {
-    "mtime": 1783279460.577737,
-    "ast_hash": "a7247671d6d0e7b5609ab28beea0d353",
+    "mtime": 1783454126.0182972,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
     "semantic_hash": ""
   },
   ".remember/today-2026-06-28.done.md": {
@@ -170,8 +170,8 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1783158441.7638142,
-    "ast_hash": "6a4295963acce9ab0444ad636e9b3ded",
+    "mtime": 1783481123.4010024,
+    "ast_hash": "55d3f93c2d3fadb1500975942a4996c7",
     "semantic_hash": ""
   },
   "docs/audit/AUDIT-0.1.0.md": {
@@ -209,11 +209,6 @@
     "ast_hash": "aa022199c8b9b873154882e3241f386e",
     "semantic_hash": ""
   },
-  ".remember/today-2026-07-05.md": {
-    "mtime": 1783279487.209074,
-    "ast_hash": "2d5b1b0ca715c0d3396cc16b3f02867e",
-    "semantic_hash": ""
-  },
   "docs/reviews/fec-0.2.0.signed.md": {
     "mtime": 1783155153.7841175,
     "ast_hash": "e23985b90a14928d7e6c8dabc9b2645f",
@@ -227,6 +222,36 @@
   "docs/reviews/fec-0.2.2.signed.md": {
     "mtime": 1783245740.6975245,
     "ast_hash": "f4b54b76e89b73ae1764dc7fb2c143b4",
+    "semantic_hash": ""
+  },
+  "fuzz/fuzz_targets/decrypt_viterbi_only.rs": {
+    "mtime": 1783481123.4050033,
+    "ast_hash": "e9fd3ba8c1c6218dfd9bd4c54dc0a16d",
+    "semantic_hash": ""
+  },
+  "tests/viterbi_only_fec.rs": {
+    "mtime": 1783481123.4090078,
+    "ast_hash": "079cf5fb23ebe4c7f04d063a53cd69db",
+    "semantic_hash": ""
+  },
+  ".remember/today-2026-07-05.done.md": {
+    "mtime": 1783279487.209074,
+    "ast_hash": "2d5b1b0ca715c0d3396cc16b3f02867e",
+    "semantic_hash": ""
+  },
+  ".remember/today-2026-07-06.done.md": {
+    "mtime": 1783395037.1804917,
+    "ast_hash": "18ca0e6d0c2b7ed7bcc303c50c793a4c",
+    "semantic_hash": ""
+  },
+  ".remember/today-2026-07-07.md": {
+    "mtime": 1783480240.9161713,
+    "ast_hash": "ae0e63163ba18036291dc655422b3a7f",
+    "semantic_hash": ""
+  },
+  "docs/reviews/fec-0.3.0.signed.md": {
+    "mtime": 1783481123.4020033,
+    "ast_hash": "20457d33d7f9fb44bad9233fe6964492",
     "semantic_hash": ""
   }
 }
