@@ -304,13 +304,20 @@ impl ErrorCorrection for ViterbiOnlyFec {
     /// length (SR-R3a / SR-R4).
     ///
     /// Caps `received.len() <= `[`MAX_BLOB_LEN`] to bound allocation, then derives
-    /// the pre-Viterbi payload length via `rs_len_from_body` (the single source of
-    /// truth for inverting the
-    /// chunked-Viterbi framing). Unlike the RS/concatenated strategies it does
-    /// **not** require the derived length to be a whole multiple of
-    /// [`RS_BLOCK`](crate::RS_BLOCK) — a Viterbi-only payload
-    /// (`header ‖ nonce ‖ ciphertext ‖ tag`) is not RS-block-aligned. Never panics
-    /// on adversarial input.
+    /// the pre-Viterbi payload length via the shared `rs_len_from_body` helper —
+    /// which here returns the **protected-payload** length
+    /// (`header ‖ nonce ‖ ciphertext ‖ tag`), *not* an RS-stream length: this codec
+    /// has no RS layer, so — unlike the RS/concatenated strategies — the derived
+    /// length is **not** required to be a whole multiple of
+    /// [`RS_BLOCK`](crate::RS_BLOCK) (a Viterbi-only payload is not RS-block-aligned).
+    /// Never panics on adversarial input.
+    ///
+    /// The [`MAX_BLOB_LEN`] cap is a **conservative over-approximation** for this
+    /// strategy — the constant bakes in the RS ≈ 1.14× expansion the concatenated
+    /// stack adds, which Viterbi-only omits, so a real Viterbi-only blob is always
+    /// well under the cap; the tighter bound on the recovered plaintext
+    /// (`plaintext_len <= MAX_PLAINTEXT_LEN`) is enforced downstream in the blob
+    /// layer.
     ///
     /// # Errors
     /// [`CryptoError::InvalidInput`] if `received` is oversized (`> MAX_BLOB_LEN`)
@@ -321,6 +328,8 @@ impl ErrorCorrection for ViterbiOnlyFec {
                 "input exceeds maximum size".into(),
             ));
         }
+        // `rs_len_from_body` inverts the chunked-Viterbi framing to the pre-encode
+        // info-byte count — for this codec that is the protected-payload length.
         rs_len_from_body(received.len())
     }
 }
