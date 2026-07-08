@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.2.2
-// Date: 2026-07-03
+// Version: 0.3.0
+// Date: 2026-07-07
 #![forbid(unsafe_code)]
 //! Authenticated encryption resilient over interference channels:
 //! `VT(interleave(RS(AEAD(data))))`.
