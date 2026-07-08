@@ -1,13 +1,14 @@
 // Author: Julian Bolivar
-// Version: 0.2.2
-// Date: 2026-07-03
+// Version: 0.3.0
+// Date: 2026-07-07
 //! Viterbi inner FEC: the [`ViterbiCodec`] wrapper over the author's own
 //! `viterbi` 0.0.1 crate — CCSDS `K=7, R=1/2` hard-decision convolutional code
-//! (SR-F3 / P0-3).
+//! (SR-F3 / P0-3) — plus the first-class [`ViterbiOnlyFec`] strategy.
 
 use viterbi::{CcsdsViterbiDecoder, CodeParams, CodedBlock, DecodeError};
 
 use crate::error::{CryptoError, Result};
+use crate::fec::ErrorCorrection;
 use crate::VITERBI_CHUNK;
 
 /// Zero-tail overhead of a single Viterbi sub-block (`2L + 2` ⇒ `+2` bytes).
@@ -239,6 +240,26 @@ fn map_decode_error(e: DecodeError) -> CryptoError {
     }
 }
 
+// STUB (Red phase): a deliberately-wrong, compiling placeholder for
+// `ViterbiOnlyFec`. Its bodies do NOT implement the real behaviour, so the
+// round-trip / length / cap tests fail by assertion (not a build error). The
+// Green phase replaces these bodies with the real implementation.
+pub struct ViterbiOnlyFec;
+
+impl ErrorCorrection for ViterbiOnlyFec {
+    fn encode(&self, _data: &[u8]) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn decode(&self, _encoded: &[u8], _pre_len: usize) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn validate_pre_fec(&self, _received: &[u8]) -> Result<usize> {
+        Ok(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ViterbiCodec;
@@ -386,5 +407,99 @@ mod tests {
             MAX_BLOB_LEN, expected,
             "MAX_BLOB_LEN must account for a Viterbi tail per chunk"
         );
+    }
+}
+
+#[cfg(test)]
+mod viterbi_only_tests {
+    use super::ViterbiOnlyFec;
+    use crate::error::CryptoError;
+    use crate::fec::ErrorCorrection;
+    use crate::{MAX_BLOB_LEN, VITERBI_CHUNK};
+    use proptest::prelude::*;
+
+    /// SR-F3 / SR-F4 / SC-1: `ViterbiOnlyFec` round-trips payloads whose length is
+    /// **not** a multiple of `RS_BLOCK` (255), across single- and multi-chunk sizes
+    /// — proving it carries no RS-block-alignment constraint.
+    #[test]
+    fn test_sr_f4_roundtrips_non_rs_aligned_lengths() {
+        let fec = ViterbiOnlyFec;
+        for len in [33usize, 100, 300, 700, VITERBI_CHUNK + 123] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 3) as u8).collect();
+            let blob = fec.encode(&data);
+            let pre_len = fec.validate_pre_fec(&blob).unwrap();
+            assert_eq!(
+                fec.decode(&blob, pre_len).unwrap(),
+                data,
+                "round-trip must recover the exact payload, len={len}"
+            );
+        }
+    }
+
+    /// SR-R3a: `validate_pre_fec` derives the pre-encode length via
+    /// `rs_len_from_body` with **no** RS-block-multiple constraint — a 300-byte
+    /// payload (300 is not a multiple of `RS_BLOCK` = 255) yields exactly 300.
+    #[test]
+    fn test_sr_r3a_validate_returns_non_rs_multiple_length() {
+        let fec = ViterbiOnlyFec;
+        let blob = fec.encode(&vec![7u8; 300]);
+        assert_eq!(fec.validate_pre_fec(&blob).unwrap(), 300);
+    }
+
+    /// SR-R4: an oversized received blob (`> MAX_BLOB_LEN`) is rejected with a typed
+    /// `InvalidInput` before any decode — never a panic, never an unbounded alloc.
+    #[test]
+    fn test_sr_r4_oversized_input_is_typed_invalid_input() {
+        let fec = ViterbiOnlyFec;
+        let oversized = vec![0u8; MAX_BLOB_LEN + 1];
+        assert!(matches!(
+            fec.validate_pre_fec(&oversized),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    /// SR-F3 / SC-8: the empty blob is a valid degenerate case — `validate_pre_fec`
+    /// yields `L = 0` and `decode` yields empty, never a panic.
+    #[test]
+    fn test_sc8_empty_blob_roundtrips_without_panic() {
+        let fec = ViterbiOnlyFec;
+        assert_eq!(fec.validate_pre_fec(&[]).unwrap(), 0);
+        assert_eq!(fec.decode(&[], 0).unwrap(), Vec::<u8>::new());
+    }
+
+    /// SC-6 / SR-R5: crafted junk buffers pass through `validate_pre_fec` and
+    /// `decode` without panicking — always a `Result`, never a crash.
+    #[test]
+    fn test_sc6_junk_input_never_panics() {
+        let fec = ViterbiOnlyFec;
+        let junks: [&[u8]; 6] = [
+            &[0u8; 1],
+            &[0xFFu8; 3],
+            &[0u8; 5],
+            &[1, 2, 3, 4, 5, 6, 7],
+            &[0xAAu8; 63],
+            &[0u8; 256],
+        ];
+        for junk in junks {
+            let _ = fec.validate_pre_fec(junk);
+            let _ = fec.decode(junk, 0);
+            let _ = fec.decode(junk, 1000);
+        }
+    }
+
+    proptest! {
+        /// SC-6 / SR-R5: over arbitrary byte strings, `ViterbiOnlyFec`'s
+        /// `validate_pre_fec` and `decode` never panic — the decrypt-path structural
+        /// guard is total.
+        #[test]
+        fn prop_sr_r5_viterbi_only_never_panics(
+            bytes in proptest::collection::vec(any::<u8>(), 0..4096)
+        ) {
+            let fec = ViterbiOnlyFec;
+            if let Ok(pre_len) = fec.validate_pre_fec(&bytes) {
+                let _ = fec.decode(&bytes, pre_len);
+            }
+            let _ = fec.decode(&bytes, 0);
+        }
     }
 }
