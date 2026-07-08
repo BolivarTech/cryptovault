@@ -18,7 +18,7 @@ pub mod viterbi;
 
 pub use interleaver::{BlockInterleaver, CsprngLayer, Interleaver};
 pub use rs::ReedSolomonCodec;
-pub use viterbi::ViterbiCodec;
+pub use viterbi::{ViterbiCodec, ViterbiOnlyFec};
 
 use crate::blob::validate_pre_fec;
 use crate::error::{CryptoError, Result};

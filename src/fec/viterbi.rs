@@ -9,7 +9,7 @@ use viterbi::{CcsdsViterbiDecoder, CodeParams, CodedBlock, DecodeError};
 
 use crate::error::{CryptoError, Result};
 use crate::fec::ErrorCorrection;
-use crate::VITERBI_CHUNK;
+use crate::{MAX_BLOB_LEN, VITERBI_CHUNK};
 
 /// Zero-tail overhead of a single Viterbi sub-block (`2L + 2` ⇒ `+2` bytes).
 ///
@@ -240,23 +240,88 @@ fn map_decode_error(e: DecodeError) -> CryptoError {
     }
 }
 
-// STUB (Red phase): a deliberately-wrong, compiling placeholder for
-// `ViterbiOnlyFec`. Its bodies do NOT implement the real behaviour, so the
-// round-trip / length / cap tests fail by assertion (not a build error). The
-// Green phase replaces these bodies with the real implementation.
+/// AEAD + Viterbi-only forward-error-correction strategy (SR-F3 / SR-F4).
+///
+/// A first-class [`ErrorCorrection`] built on the inner [`ViterbiCodec`] alone —
+/// **no** outer Reed-Solomon and **no** interleaver. It is symmetric with
+/// [`ReedSolomonCodec`](crate::fec::ReedSolomonCodec) (the RS-only strategy):
+/// inject it into [`CryptoVault::new`](crate::vault::CryptoVault::new) for channel
+/// resilience that corrects random bit errors (Viterbi coding gain) without RS's
+/// burst correction or the ≈ 1.14× RS expansion. Confidentiality and integrity are
+/// **unaffected** — they come only from the AEAD applied first; the FEC choice
+/// changes only channel resilience.
+///
+/// # Wire format
+/// The blob body is [`ViterbiCodec::encode`] applied to the protected payload
+/// directly (no RS codewords), so — unlike the RS/concatenated strategies — the
+/// recovered length is **not** constrained to a whole multiple of
+/// [`RS_BLOCK`](crate::RS_BLOCK). A blob is decodable only by the same strategy
+/// that produced it.
+///
+/// A fieldless strategy struct — construct it directly (`ViterbiOnlyFec`); it
+/// holds no state.
+///
+/// # Examples
+/// ```
+/// use cryptovault::fec::{ErrorCorrection, ViterbiOnlyFec};
+/// let fec = ViterbiOnlyFec;
+/// let protected = b"header|nonce|ciphertext|tag".to_vec();
+/// let blob = fec.encode(&protected);
+/// let pre_len = fec.validate_pre_fec(&blob).unwrap();
+/// assert_eq!(fec.decode(&blob, pre_len).unwrap(), protected);
+/// ```
 pub struct ViterbiOnlyFec;
 
 impl ErrorCorrection for ViterbiOnlyFec {
-    fn encode(&self, _data: &[u8]) -> Vec<u8> {
-        Vec::new()
+    /// Viterbi-encodes `data` (SR-F3), returning the coded blob body.
+    ///
+    /// Delegates to [`ViterbiCodec::encode`]; infallible by the
+    /// [`ErrorCorrection::encode`] contract.
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        ViterbiCodec.encode(data)
     }
 
-    fn decode(&self, _encoded: &[u8], _pre_len: usize) -> Result<Vec<u8>> {
-        Ok(Vec::new())
+    /// Viterbi-decodes `encoded` and truncates the recovered stream to `pre_len`.
+    ///
+    /// # ⚠️ No self-enforced length cap (N4)
+    /// This method does **not** enforce [`MAX_BLOB_LEN`] — that cap lives in
+    /// [`validate_pre_fec`](Self::validate_pre_fec) and the vault
+    /// decrypt path, applied *before* decode. A caller invoking this codec directly,
+    /// bypassing the vault, **must impose its own input-length cap**.
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidInput`] if `encoded`'s framing is inconsistent with
+    ///   the chunked-Viterbi body formula (rejected before the codec runs).
+    /// - [`CryptoError::ErrorCorrection`] if the backing decoder reports an
+    ///   allocation failure.
+    fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
+        let recovered = ViterbiCodec.decode(encoded)?;
+        let end = pre_len.min(recovered.len());
+        Ok(recovered[..end].to_vec())
     }
 
-    fn validate_pre_fec(&self, _received: &[u8]) -> Result<usize> {
-        Ok(0)
+    /// Validates the Viterbi-only framing and returns the recovered pre-decode
+    /// length (SR-R3a / SR-R4).
+    ///
+    /// Caps `received.len() <= `[`MAX_BLOB_LEN`] to bound allocation, then derives
+    /// the pre-Viterbi payload length via `rs_len_from_body` (the single source of
+    /// truth for inverting the
+    /// chunked-Viterbi framing). Unlike the RS/concatenated strategies it does
+    /// **not** require the derived length to be a whole multiple of
+    /// [`RS_BLOCK`](crate::RS_BLOCK) — a Viterbi-only payload
+    /// (`header ‖ nonce ‖ ciphertext ‖ tag`) is not RS-block-aligned. Never panics
+    /// on adversarial input.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `received` is oversized (`> MAX_BLOB_LEN`)
+    /// or structurally malformed for the chunked-Viterbi framing.
+    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
+        if received.len() > MAX_BLOB_LEN {
+            return Err(CryptoError::InvalidInput(
+                "input exceeds maximum size".into(),
+            ));
+        }
+        rs_len_from_body(received.len())
     }
 }
 
