@@ -43,5 +43,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "decrypt_viterbi_only"
+path = "fuzz_targets/decrypt_viterbi_only.rs"
+test = false
+doc = false
+bench = false
+
 # Own workspace so the parent crate's gates never build the fuzz targets.
 [workspace]
