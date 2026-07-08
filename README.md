@@ -167,7 +167,7 @@ come only from the AEAD, applied first; the FEC choice changes only channel resi
 | Concatenated (default) | `CryptoVault::default()` / `ConcatenatedFec` |
 | AEAD-only (no FEC) | `NoFec` |
 | Reed-Solomon only | `fec::ReedSolomonCodec` (already an `ErrorCorrection`) |
-| Viterbi only | a thin adapter over `fec::ViterbiCodec` |
+| Viterbi only | `fec::ViterbiOnlyFec` (already an `ErrorCorrection`) |
 | Your own codec | any `impl ErrorCorrection` |
 
 > A blob is decodable **only** by the same strategy that produced it — each wire format
@@ -221,41 +221,20 @@ assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap().as_str(), "sk-secret");
 
 #### Viterbi only
 
-`fec::ViterbiCodec` is the inner code: it exposes inherent `encode` / `decode` methods
-(its `decode` takes no `pre_len`) rather than the `ErrorCorrection` trait, so wrap it in
-a small adapter that truncates to `pre_len` and caps the received length. *(A first-class
-`ViterbiOnlyFec` strategy is planned for `v0.3.0`; until then, this adapter is the
-supported route.)*
+`fec::ViterbiOnlyFec` is a first-class `ErrorCorrection` strategy — inject it directly for
+AEAD + Viterbi (no interleaver or Reed-Solomon). It corrects random bit errors (Viterbi
+coding gain) without RS's burst correction or the ≈ 1.14× RS expansion:
 
 ```rust
-use cryptovault::{CryptoVault, ErrorCorrection, CryptoError, Result, MAX_BLOB_LEN};
-use cryptovault::fec::ViterbiCodec;
+use cryptovault::CryptoVault;
+use cryptovault::fec::ViterbiOnlyFec;
 use cryptovault::kdf::Argon2Kdf;
 use cryptovault::cipher::Aes256GcmSivCipher;
-
-struct ViterbiOnly;
-
-impl ErrorCorrection for ViterbiOnly {
-    fn encode(&self, data: &[u8]) -> Vec<u8> {
-        ViterbiCodec.encode(data)
-    }
-    fn decode(&self, encoded: &[u8], pre_len: usize) -> Result<Vec<u8>> {
-        let recovered = ViterbiCodec.decode(encoded)?;
-        let end = pre_len.min(recovered.len());
-        Ok(recovered[..end].to_vec())
-    }
-    fn validate_pre_fec(&self, received: &[u8]) -> Result<usize> {
-        if received.len() > MAX_BLOB_LEN {
-            return Err(CryptoError::InvalidInput("input exceeds maximum size".into()));
-        }
-        Ok(received.len())
-    }
-}
 
 let vault = CryptoVault::new(
     Box::new(Argon2Kdf),
     Box::new(Aes256GcmSivCipher),
-    Box::new(ViterbiOnly),
+    Box::new(ViterbiOnlyFec),
 );
 let key = vault.derive_key("master-passphrase", &[0u8; 16]).unwrap();
 let blob = vault.encrypt_with_key(&key, "sk-secret").unwrap();
